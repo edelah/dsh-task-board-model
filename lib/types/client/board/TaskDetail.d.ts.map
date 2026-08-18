@@ -1,0 +1,1 @@
+{"version":3,"file":"TaskDetail.d.ts","sourceRoot":"","sources":["../../../../src/client/board/TaskDetail.tsx"],"names":[],"mappings":"AAOA,OAAO,KAAK,EAAE,eAAe,EAAE,MAAM,0BAA0B,CAAA;AAE/D,OAAO,EAAgF,KAAK,UAAU,EAAmB,MAAM,qBAAqB,CAAA;AAyQpJ,2BAA2B;AAC3B,wBAAgB,UAAU,CAAC,EAAE,UAAU,EAAE,IAAI,EAAE,EAAE;IAAE,UAAU,EAAE,eAAe,CAAC;IAAC,IAAI,EAAE,UAAU,CAAA;CAAE,+BAgJjG"}

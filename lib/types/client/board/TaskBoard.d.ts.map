@@ -1,0 +1,1 @@
+{"version":3,"file":"TaskBoard.d.ts","sourceRoot":"","sources":["../../../../src/client/board/TaskBoard.tsx"],"names":[],"mappings":"AAMA,OAAO,EAAkB,KAAK,eAAe,EAAE,MAAM,0BAA0B,CAAA;AA2B/E,8DAA8D;AAC9D,wBAAgB,SAAS,CAAC,EAAE,UAAU,EAAE,EAAE;IAAE,UAAU,EAAE,eAAe,CAAA;CAAE,+BAuGxE"}

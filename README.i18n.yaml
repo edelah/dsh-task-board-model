@@ -1,0 +1,5 @@
+# Documentation pair for this local fork. The English and Chinese files are
+# maintained together; hashes from the upstream package are intentionally not
+# retained here.
+README.md: local-fork
+README.zh.md: local-fork

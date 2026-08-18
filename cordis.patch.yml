@@ -1,0 +1,12 @@
+# Custom model-aware task-board bundle patch. Activate with:
+# `dsh plugin --profile <name> add link:~/path/to/dsh-task-board-model`.
+#
+# Replace either the aggregate row or a standalone original install so both
+# implementations do not compete for the same sidebar/board DOM surface.
+- id: web-ui-task-board
+  disabled: true
+- id: ui-task-board
+  disabled: true
+- insert:
+    - id: ui-task-board-model
+      name: dsh-task-board-model
