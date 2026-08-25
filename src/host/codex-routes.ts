@@ -320,6 +320,95 @@ function readAgentMessage(item: unknown): { phase: string | undefined; text: str
   return { phase, text }
 }
 
+/** Project a stored Codex thread onto the safe, chat-facing shape. */
+function normalizeConversation(thread: Record<string, unknown>): Record<string, unknown> {
+  const turns = Array.isArray(thread.turns) ? thread.turns : []
+  return {
+    threadId: String(thread.id),
+    turns: turns.flatMap((value, turnIndex) => {
+      if (typeof value !== 'object' || value === null) return []
+      const turn = value as Record<string, unknown>
+      const items = Array.isArray(turn.items) ? turn.items : []
+      const messages: Array<Record<string, unknown>> = []
+      const activity: Array<Record<string, unknown>> = []
+      for (const [itemIndex, itemValue] of items.entries()) {
+        if (typeof itemValue !== 'object' || itemValue === null) continue
+        const item = itemValue as Record<string, unknown>
+        const id = typeof item.id === 'string' && item.id !== ''
+          ? item.id
+          : `turn-${turnIndex}-item-${itemIndex}`
+        if (item.type === 'userMessage') {
+          const content = Array.isArray(item.content) ? item.content : []
+          const text = content.flatMap(part => {
+            if (typeof part !== 'object' || part === null) return []
+            const record = part as Record<string, unknown>
+            return record.type === 'text' && typeof record.text === 'string' ? [record.text] : []
+          }).join('\n').trim()
+          if (text !== '') messages.push({ id, role: 'user', text })
+          continue
+        }
+        const agentMessage = readAgentMessage(item)
+        if (agentMessage !== undefined && agentMessage.text.trim() !== '') {
+          const phase = agentMessage.phase === 'commentary' || agentMessage.phase === 'final_answer'
+            ? agentMessage.phase
+            : undefined
+          messages.push({ id, role: 'assistant', text: agentMessage.text, ...(phase === undefined ? {} : { phase }) })
+          continue
+        }
+        const summary = describeItem(item)
+        if (summary !== undefined) activity.push({ id, ...summary })
+      }
+      const errorRecord = typeof turn.error === 'object' && turn.error !== null
+        ? turn.error as Record<string, unknown>
+        : undefined
+      const error = typeof errorRecord?.message === 'string' ? errorRecord.message : undefined
+      return [{
+        id: typeof turn.id === 'string' && turn.id !== '' ? turn.id : `turn-${turnIndex}`,
+        status: typeof turn.status === 'string' ? turn.status : 'unknown',
+        messages,
+        activity,
+        ...(error === undefined ? {} : { error }),
+      }]
+    }),
+  }
+}
+
+/** Read one task-owned thread without resuming it or subscribing to events. */
+async function readCodexConversation(
+  subprocess: SubprocessFace,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : ''
+  const expectedThreadId = typeof args.threadId === 'string' ? args.threadId.trim() : ''
+  if (taskId === '' || expectedThreadId === '') return { ok: false, error: 'taskId and threadId are required' }
+  const binding = await loadBinding(bindingDirectory(), taskId)
+  if (binding === undefined) return { ok: false, error: 'no thread binding exists for this task' }
+  if (binding.threadId !== expectedThreadId) return { ok: false, error: 'thread binding mismatch' }
+
+  let codexPath: string
+  try {
+    codexPath = await subprocess.resolveExecutable('codex')
+  } catch {
+    return { ok: false, error: 'the codex CLI was not found on this machine' }
+  }
+  const client = new AppServerClient({
+    subprocess,
+    codexPath,
+    cwd: homedir(),
+    env: codexChildEnvironment(homedir(), codexHome()),
+    clientInfo: { name: 'dsh-task-board-model', title: 'DSH Task Board', version: '0.2.0' },
+  })
+  try {
+    await client.start()
+    const thread = await client.threadRead(binding.threadId)
+    return { ok: true, conversation: normalizeConversation(thread) }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    await client.dispose()
+  }
+}
+
 /** Attach notification + server-request handlers to a client for one run. */
 function attachRunHandlers(client: AppServerClient, run: CodexRun): void {
   // Server→client requests: fail closed (decline approvals, empty answers).
@@ -932,6 +1021,7 @@ export const ROUTE_CODEX_START = '/dsh-task-board/codex/start'
 export const ROUTE_CODEX_STATUS = '/dsh-task-board/codex/status'
 export const ROUTE_CODEX_CANCEL = '/dsh-task-board/codex/cancel'
 export const ROUTE_CODEX_STEER = '/dsh-task-board/codex/steer'
+export const ROUTE_CODEX_THREAD = '/dsh-task-board/codex/thread'
 export const ROUTE_CODEX_ENV = '/dsh-task-board/codex/env'
 export const ROUTE_WORKTREE_CREATE = '/dsh-task-board/worktree/create'
 export const ROUTE_WORKTREE_REMOVE = '/dsh-task-board/worktree/remove'
@@ -962,6 +1052,10 @@ export function taskBoardRouteHandlers(
       return runStatus(run)
     }],
     [ROUTE_CODEX_STEER, async args => steerCodexRun(args)],
+    [ROUTE_CODEX_THREAD, async args => {
+      if (subprocess === undefined) return { ok: false, error: 'the subprocess service is not mounted' }
+      return readCodexConversation(subprocess, args)
+    }],
     [ROUTE_CODEX_CANCEL, async args => cancelCodexRun(args)],
     [ROUTE_WORKTREE_CREATE, async args => {
       if (subprocess === undefined) return { ok: false, error: 'the subprocess service is not mounted' }

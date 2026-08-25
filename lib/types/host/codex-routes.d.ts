@@ -165,6 +165,7 @@ export declare const ROUTE_CODEX_START = "/dsh-task-board/codex/start";
 export declare const ROUTE_CODEX_STATUS = "/dsh-task-board/codex/status";
 export declare const ROUTE_CODEX_CANCEL = "/dsh-task-board/codex/cancel";
 export declare const ROUTE_CODEX_STEER = "/dsh-task-board/codex/steer";
+export declare const ROUTE_CODEX_THREAD = "/dsh-task-board/codex/thread";
 export declare const ROUTE_CODEX_ENV = "/dsh-task-board/codex/env";
 export declare const ROUTE_WORKTREE_CREATE = "/dsh-task-board/worktree/create";
 export declare const ROUTE_WORKTREE_REMOVE = "/dsh-task-board/worktree/remove";

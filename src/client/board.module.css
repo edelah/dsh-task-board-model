@@ -77,6 +77,29 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   font-weight: 600;
 }
 
+/* Retained terminal rows remain actionable history, but their state should
+   still be legible without reopening the board. */
+.entry[data-job-state='succeeded'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.entry[data-job-state='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.entry[data-job-state='cancelled'] {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* The shell keeps its last conversation as the runtime's current session
+   while this plugin owns the center column. Do not show that stale session as
+   the active sidebar location; the task-board/job row supplies the panel
+   selection instead. The aria-selected state itself is left untouched so the
+   shell's session navigation remains stable when the board closes. */
+html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [role='treeitem'][aria-selected='true'] {
+  background: transparent;
+}
+
 .entryIcon {
   display: inline-flex;
   align-items: center;
@@ -1036,4 +1059,183 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   flex: 1;
   min-width: 0;
   resize: vertical;
+}
+
+/* --- Codex conversation ----------------------------------------------------- */
+
+.codexChat {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  font-family: var(--dsw-font-family);
+}
+
+.codexChatHeader {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.codexChatTitleGroup {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.codexChatTitle {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.codexChatMessages {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px max(24px, calc((100% - 860px) / 2));
+}
+
+.codexTurn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.codexUserMessage {
+  align-self: flex-end;
+  max-width: min(78%, 680px);
+  padding: 10px 13px;
+  border-radius: 14px 14px 4px 14px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+.codexAssistantMessage,
+.codexCommentaryMessage {
+  align-self: stretch;
+  min-width: 0;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.codexCommentaryMessage {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+}
+
+.codexActivity {
+  align-self: flex-start;
+  max-width: 100%;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.codexActivity summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.codexActivity ul {
+  margin: 8px 0 0;
+  padding: 8px 10px 8px 28px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+  font-family: var(--dsw-font-markdown-code-block-small);
+  line-height: 1.55;
+}
+
+.codexChatNotice,
+.codexRunningLabel {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+}
+
+.codexRunningLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codexChatError {
+  padding: 14px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 10px;
+}
+
+.codexChatError > p:first-child,
+.codexTurnError {
+  margin: 0 0 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.codexComposer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 12px max(24px, calc((100% - 860px) / 2));
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+}
+
+.codexComposerInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  max-height: 160px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.codexComposerInput:focus {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+
+.codexComposer .codexTurnError {
+  grid-column: 1 / -1;
+}
+
+@container task-board-view (max-width: 620px) {
+  .codexChatHeader {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .codexChatHeader > :last-child {
+    grid-column: 1 / -1;
+  }
+
+  .codexChatMessages,
+  .codexComposer {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .codexUserMessage {
+    max-width: 90%;
+  }
 }

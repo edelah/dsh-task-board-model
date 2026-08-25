@@ -84,6 +84,40 @@ export interface CodexRunSnapshot {
   liveAnswer?: string
 }
 
+/** One user/assistant message projected from a persisted Codex turn. */
+export interface CodexConversationMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  phase?: 'commentary' | 'final_answer'
+}
+
+/** One safe activity summary projected from a Codex tool item. */
+export interface CodexConversationActivity {
+  id: string
+  kind: CodexActivityLine['kind']
+  text: string
+}
+
+/** One persisted Codex turn, suitable for the task-board chat surface. */
+export interface CodexConversationTurn {
+  id: string
+  status: string
+  messages: readonly CodexConversationMessage[]
+  activity: readonly CodexConversationActivity[]
+  error?: string
+}
+
+/** Complete persisted Codex thread history. */
+export interface CodexConversation {
+  threadId: string
+  turns: readonly CodexConversationTurn[]
+}
+
+export type CodexConversationResult =
+  | { ok: true; conversation: CodexConversation }
+  | { ok: false; error: string }
+
 /** One status probe result for a hosted Codex run. */
 export type CodexStatusResult =
   | { ok: true; state: 'running'; threadId?: string; activity?: readonly CodexActivityLine[]; liveAnswer?: string }
@@ -106,6 +140,8 @@ export interface CodexExecutionFace {
     { ok: true; runId: string; threadId?: string } | { ok: false; error: unknown }
   >
   status(runId: string): Promise<CodexStatusResult>
+  /** Read a task-owned persisted thread without resuming it. */
+  readConversation(taskId: string, threadId: string): Promise<CodexConversationResult>
   /** Steer the active turn with additional user input. */
   steer(runId: string, content: string): Promise<{ ok: boolean; error?: string }>
   /** Best-effort interrupt of a running turn (grace before force-kill). */
@@ -558,6 +594,19 @@ export class ExecutionService {
   /** Whether a follow-up can be sent: the latest Codex execution owns a thread. */
   canFollowUp(task: TaskRecord): boolean {
     return task.executor === 'codex' && latestCodexThreadId(task) !== undefined
+  }
+
+  /** Read the latest Codex thread for a task without changing its state. */
+  async readCodexConversation(task: TaskRecord): Promise<CodexConversationResult> {
+    const threadId = latestCodexThreadId(task)
+    if (threadId === undefined) return { ok: false, error: 'this task has no persisted Codex thread' }
+    const codex = this.env.codex
+    if (codex === undefined) return { ok: false, error: 'codex executor unavailable' }
+    try {
+      return await codex.readConversation(task.id, threadId)
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
   }
 
   /**

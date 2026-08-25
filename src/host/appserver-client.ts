@@ -5,7 +5,7 @@
  * Wire facts (validated against the installed CLI's generated protocol
  * schema, codex 0.149.0):
  * - newline-delimited JSON over stdio, one message per line;
- * - client requests: `initialize`, `thread/start`, `thread/resume`,
+ * - client requests: `initialize`, `thread/start`, `thread/resume`, `thread/read`,
  *   `turn/start`, `turn/steer`, `turn/interrupt`;
  * - server→client requests (approvals, user input, elicitations) must be
  *   answered — the policy here is fail-closed: every approval is declined;
@@ -236,7 +236,8 @@ export class AppServerClient {
    * wait for full exit. Idempotent.
    */
   async dispose(): Promise<void> {
-    if (this.handle === undefined || this.exited) {
+    if (this.handle === undefined) return
+    if (this.exited) {
       await this.waitForExit().catch(() => undefined)
       return
     }
@@ -316,6 +317,19 @@ export class AppServerClient {
     }
     if (thread.id !== params.threadId) {
       throw new Error(`thread/resume returned ${String(thread.id)} instead of the requested ${params.threadId}`)
+    }
+    return thread
+  }
+
+  /** Read a persisted thread without resuming or subscribing to it. */
+  async threadRead(threadId: string): Promise<Record<string, unknown>> {
+    const result = await this.request('thread/read', {
+      threadId,
+      includeTurns: true,
+    }) as { thread?: Record<string, unknown> } | undefined
+    const thread = result?.thread
+    if (thread === undefined || thread.id !== threadId) {
+      throw new Error('thread/read returned no matching thread')
     }
     return thread
   }

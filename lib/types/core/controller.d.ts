@@ -13,7 +13,7 @@
  * owns only the orchestration seam (state, persistence, notify, execution,
  * navigation, reconciliation).
  */
-import { ExecutionService, type CodexRunSnapshot } from './execution.ts';
+import { ExecutionService, type CodexConversationResult, type CodexRunSnapshot } from './execution.ts';
 import type { TaskStore } from './store.ts';
 import { type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts';
 import { type TaskUpdatePatch } from './use-cases/task-update.ts';
@@ -126,11 +126,15 @@ export interface ControllerSnapshot {
     /** True when the board shows the archive view instead of the columns. */
     archiveView: boolean;
     selectedTaskId: string | undefined;
+    /** Codex task whose persisted thread is shown in the chat-first surface. */
+    codexChatTaskId: string | undefined;
     /** Picker option sets (workspace list + agent-preset roster + models). */
     executionOptions: ExecutionOptionsSnapshot;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
+/** The Codex task currently shown as a conversation, or undefined. */
+export declare function selectedCodexTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
 /**
  * Board controller (see module doc). All mutations bump the snapshot and
  * persist through the store; UI and DOM mounts subscribe and re-render.
@@ -141,6 +145,7 @@ export declare class BoardController {
     private boardOpen;
     private archiveView;
     private selectedTaskId;
+    private codexChatTaskId;
     private executionOptions;
     private listeners;
     private disposers;
@@ -166,6 +171,8 @@ export declare class BoardController {
      */
     toggleArchiveView(): void;
     openTask(id: string): void;
+    /** Open a Codex task's persisted thread in the board-owned chat surface. */
+    openCodexConversation(id: string): void;
     closeTask(): void;
     createTask(input: NewTaskInput): TaskRecord | undefined;
     updateTask(id: string, patch: TaskUpdatePatch): void;
@@ -273,6 +280,8 @@ export declare class BoardController {
     }>;
     /** Live snapshot of the latest hosted Codex run (detail-view progress). */
     codexRunSnapshot(id: string): Promise<CodexRunSnapshot | undefined>;
+    /** Load a task's complete persisted Codex conversation. */
+    codexConversation(id: string): Promise<CodexConversationResult>;
     /**
      * Best-effort cancel of the latest running execution: hosted Codex turns
      * are interrupted (turn/interrupt) with a bounded grace before the child

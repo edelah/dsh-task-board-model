@@ -44,9 +44,22 @@ export function mountBoard(controller: BoardController): () => void {
   let container: HTMLDivElement | undefined
 
   const ensure = (): void => {
-    if (container !== undefined) return
     const column = conversationColumn()
     if (column === undefined) return
+
+    // The shell can replace the center column during navigation or a React
+    // layout refresh. Keep the mounted React root, but move its host into the
+    // current column instead of treating the old (disconnected) container as
+    // permanently mounted. Without this check the board disappears after a
+    // pane rebuild and the page looks crashed even though the controller is
+    // still alive.
+    if (container !== undefined) {
+      if (container.parentElement !== column || !container.isConnected) {
+        column.appendChild(container)
+      }
+      return
+    }
+
     container = document.createElement('div')
     container.dataset.dshTaskboardView = ''
     container.className = css.boardView

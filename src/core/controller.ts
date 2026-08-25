@@ -13,7 +13,9 @@
  * owns only the orchestration seam (state, persistence, notify, execution,
  * navigation, reconciliation).
  */
-import { ExecutionService, type CodexRunSnapshot, type ExecutionEvent } from './execution.ts'
+import {
+  ExecutionService, type CodexConversationResult, type CodexRunSnapshot, type ExecutionEvent,
+} from './execution.ts'
 import type { TaskStore } from './store.ts'
 import {
   settleExecution, startExecution, withStatus,
@@ -143,6 +145,8 @@ export interface ControllerSnapshot {
   /** True when the board shows the archive view instead of the columns. */
   archiveView: boolean
   selectedTaskId: string | undefined
+  /** Codex task whose persisted thread is shown in the chat-first surface. */
+  codexChatTaskId: string | undefined
   /** Picker option sets (workspace list + agent-preset roster + models). */
   executionOptions: ExecutionOptionsSnapshot
 }
@@ -151,6 +155,12 @@ export interface ControllerSnapshot {
 export function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined {
   if (snapshot.selectedTaskId === undefined) return undefined
   return snapshot.tasks.find(task => task.id === snapshot.selectedTaskId)
+}
+
+/** The Codex task currently shown as a conversation, or undefined. */
+export function selectedCodexTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined {
+  if (snapshot.codexChatTaskId === undefined) return undefined
+  return snapshot.tasks.find(task => task.id === snapshot.codexChatTaskId)
 }
 
 function randomUuid(): string {
@@ -183,6 +193,7 @@ export class BoardController {
   private boardOpen = false
   private archiveView = false
   private selectedTaskId: string | undefined
+  private codexChatTaskId: string | undefined
   private executionOptions: ExecutionOptionsSnapshot = { workspaces: [], presets: [], models: [], codex: EMPTY_CODEX_OPTIONS }
   private listeners = new Set<() => void>()
   private disposers: Array<() => void> = []
@@ -232,6 +243,7 @@ export class BoardController {
       boardOpen: this.boardOpen,
       archiveView: this.archiveView,
       selectedTaskId: this.selectedTaskId,
+      codexChatTaskId: this.codexChatTaskId,
       executionOptions: this.executionOptions,
     }
   }
@@ -249,7 +261,12 @@ export class BoardController {
   // --- view state -------------------------------------------------------------
 
   openBoard(): void {
-    if (this.boardOpen) return
+    const leavingChat = this.codexChatTaskId !== undefined
+    this.codexChatTaskId = undefined
+    if (this.boardOpen) {
+      if (leavingChat) this.notify()
+      return
+    }
     // Baseline the selection the board opened against: the board stays open
     // until the user navigates (selection changes), never on mere status
     // updates of the already-selected session.
@@ -265,7 +282,7 @@ export class BoardController {
   }
 
   toggleBoard(): void {
-    if (this.boardOpen) this.closeBoard()
+    if (this.boardOpen && this.codexChatTaskId === undefined) this.closeBoard()
     else this.openBoard()
   }
 
@@ -285,9 +302,22 @@ export class BoardController {
 
   openTask(id: string): void {
     if (this.tasks.some(task => task.id === id)) {
+      this.codexChatTaskId = undefined
       this.selectedTaskId = id
       this.notify()
     }
+  }
+
+  /** Open a Codex task's persisted thread in the board-owned chat surface. */
+  openCodexConversation(id: string): void {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    const latest = task?.executions[task.executions.length - 1]
+    if (latest?.runner !== 'codex' || latest.threadId === undefined) return
+    this.lastCurrent = currentOf(this.deps.sessions)
+    this.selectedTaskId = undefined
+    this.codexChatTaskId = id
+    this.boardOpen = true
+    this.notify()
   }
 
   closeTask(): void {
@@ -329,6 +359,7 @@ export class BoardController {
     const { tasks, selectionCleared } = applyDeleteTask(this.tasks, this.selectedTaskId, id)
     this.tasks = [...tasks]
     if (selectionCleared) this.selectedTaskId = undefined
+    if (this.codexChatTaskId === id) this.codexChatTaskId = undefined
     this.persistAndNotify()
   }
 
@@ -591,6 +622,13 @@ export class BoardController {
     return this.deps.exec.peekCodexRun(task)
   }
 
+  /** Load a task's complete persisted Codex conversation. */
+  async codexConversation(id: string): Promise<CodexConversationResult> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined) return { ok: false, error: 'task not found' }
+    return this.deps.exec.readCodexConversation(task)
+  }
+
   /**
    * Best-effort cancel of the latest running execution: hosted Codex turns
    * are interrupted (turn/interrupt) with a bounded grace before the child
@@ -718,4 +756,3 @@ function attachRunIdentity(
         : execution),
   }
 }
-

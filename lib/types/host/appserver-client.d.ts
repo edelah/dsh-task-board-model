@@ -5,7 +5,7 @@
  * Wire facts (validated against the installed CLI's generated protocol
  * schema, codex 0.149.0):
  * - newline-delimited JSON over stdio, one message per line;
- * - client requests: `initialize`, `thread/start`, `thread/resume`,
+ * - client requests: `initialize`, `thread/start`, `thread/resume`, `thread/read`,
  *   `turn/start`, `turn/steer`, `turn/interrupt`;
  * - server→client requests (approvals, user input, elicitations) must be
  *   answered — the policy here is fail-closed: every approval is declined;
@@ -127,6 +127,8 @@ export declare class AppServerClient {
         approvalPolicy?: 'untrusted' | 'on-request' | 'never';
         sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
     }): Promise<Record<string, unknown>>;
+    /** Read a persisted thread without resuming or subscribing to it. */
+    threadRead(threadId: string): Promise<Record<string, unknown>>;
     /** Start one turn on a thread. Returns the Turn view (id + status). */
     turnStart(params: {
         threadId: string;

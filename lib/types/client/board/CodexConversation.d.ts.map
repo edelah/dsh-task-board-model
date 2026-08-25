@@ -1,0 +1,1 @@
+{"version":3,"file":"CodexConversation.d.ts","sourceRoot":"","sources":["../../../../src/client/board/CodexConversation.tsx"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,eAAe,EAAE,MAAM,0BAA0B,CAAA;AAE/D,OAAO,KAAK,EAAE,UAAU,EAAE,MAAM,qBAAqB,CAAA;AAUrD,gEAAgE;AAChE,wBAAgB,iBAAiB,CAAC,EAAE,UAAU,EAAE,IAAI,EAAE,EAAE;IAAE,UAAU,EAAE,eAAe,CAAC;IAAC,IAAI,EAAE,UAAU,CAAA;CAAE,+BA+JxG"}

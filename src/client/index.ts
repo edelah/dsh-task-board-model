@@ -17,11 +17,14 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings-surface Context merge (ctx.settingsScope).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BoardController, EMPTY_CODEX_OPTIONS, type CodexModelChoice } from '../core/controller.ts'
-import { ExecutionService, type CodexExecutionFace, type WorktreeExecutionFace } from '../core/execution.ts'
+import {
+  ExecutionService, type CodexConversation, type CodexExecutionFace, type WorktreeExecutionFace,
+} from '../core/execution.ts'
 import { SchedulerService } from '../core/scheduler.ts'
 import { LocalStorageTaskStore } from '../core/store.ts'
 import { claimTaskboardApply, releaseTaskboardApply } from './apply-guard.ts'
 import { mountBoard } from './board-mount.tsx'
+import { mountRunningJobs } from './running-jobs.ts'
 import { mountSidebarEntry } from './sidebar-entry.ts'
 import { TaskBoardSettingsCard, TaskBoardSettingsCardController, type TaskBoardSettings } from './TaskBoardSettingsCard.tsx'
 import { en, setTaskBoardLocale, zh, type TaskBoardKey } from './locales.ts'
@@ -38,6 +41,7 @@ const ROUTE_CODEX_START = '/dsh-task-board/codex/start'
 const ROUTE_CODEX_STATUS = '/dsh-task-board/codex/status'
 const ROUTE_CODEX_CANCEL = '/dsh-task-board/codex/cancel'
 const ROUTE_CODEX_STEER = '/dsh-task-board/codex/steer'
+const ROUTE_CODEX_THREAD = '/dsh-task-board/codex/thread'
 const ROUTE_WORKTREE_CREATE = '/dsh-task-board/worktree/create'
 const ROUTE_WORKTREE_REMOVE = '/dsh-task-board/worktree/remove'
 
@@ -201,6 +205,17 @@ export function apply(ctx: ClientContext): void {
           ...(activity === undefined ? {} : { activity }),
         }
       },
+      readConversation: async (taskId, threadId) => {
+        const payload = await postHostRoute(ROUTE_CODEX_THREAD, { taskId, threadId })
+        const conversation = payload.conversation
+        if (payload.ok === true && typeof conversation === 'object' && conversation !== null) {
+          const record = conversation as Record<string, unknown>
+          if (record.threadId === threadId && Array.isArray(record.turns)) {
+            return { ok: true, conversation: conversation as CodexConversation }
+          }
+        }
+        return { ok: false, error: String(payload.error ?? 'codex thread could not be read') }
+      },
       steer: async (runId, content) => {
         const payload = await postHostRoute(ROUTE_CODEX_STEER, { runId, content })
         if (payload.ok === true) return { ok: true }
@@ -356,6 +371,7 @@ export function apply(ctx: ClientContext): void {
 
     const disposers: Array<() => void> = []
     const syncLocale = (): void => {
+      if (!active) return
       setTaskBoardLocale(ctx.locale.getLocale().active)
       controller.refresh()
     }
@@ -485,6 +501,19 @@ export function apply(ctx: ClientContext): void {
     }))
     try {
       disposers.push(mountSidebarEntry(controller))
+      // Live/result execution rows are inserted into the matching workspace
+      // group; clicking one opens the board on that task. Active DSH rows
+      // hand off to the shell's native session row, while terminal results
+      // remain inspectable until archive/delete. The runtime source also
+      // resolves unpinned tasks to the same recent-workspace fallback used by
+      // ExecutionService.
+      disposers.push(mountRunningJobs(controller, () => {
+        const workspaceList = workspaces.list.getSnapshot()
+        return {
+          workspaceIds: workspaceList.items.map(item => item.workspaceId as string),
+          recentWorkspaceId: workspaceList.recentWorkspaceId as string | undefined,
+        }
+      }))
       disposers.push(mountBoard(controller))
     } catch (error) {
       // DOM failures degrade the board, never the GUI.
@@ -498,7 +527,9 @@ export function apply(ctx: ClientContext): void {
       uiDisposer = undefined
     }
   }
+  let active = true
   const syncEnabled = (): void => {
+    if (!active) return
     const snapshot = settingsScope.getSnapshot()
     const enabled = snapshot.status === 'ready'
       ? snapshot.value?.enabled ?? true
@@ -506,6 +537,18 @@ export function apply(ctx: ClientContext): void {
     if (enabled) mountUi()
     else uiDisposer?.()
   }
-  settingsScope.subscribe(syncEnabled)
-  syncEnabled()
+  // Settings and locale subscriptions must die with this plugin fiber. If a
+  // hot reload or context teardown leaves either callback alive, its next
+  // notification can dereference ctx.locale after the service is inactive and
+  // take down the host's subscriber pipeline.
+  ctx.effect(() => {
+    const unsubscribeSettings = settingsScope.subscribe(syncEnabled)
+    syncEnabled()
+    return () => {
+      active = false
+      unsubscribeSettings()
+      uiDisposer?.()
+      uiDisposer = undefined
+    }
+  }, 'task-board: client lifecycle')
 }

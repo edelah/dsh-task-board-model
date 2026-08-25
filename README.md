@@ -5,6 +5,7 @@ A local fork of the DSH Web GUI task board with **per-task model and reasoning-e
 ## What changed
 
 - Select a provider/model for each task, or leave it at the runtime default.
+- An active execution without a native DSH session gets a synthetic sidebar item under its workspace (Codex runs, or the brief DSH session-creation window). Once DSH creates the real session row, the live synthetic item disappears to avoid duplicate live titles. After settlement, a result row remains under the workspace until the task is archived or deleted; DSH results open their native conversation and Codex results open the persisted Codex thread in a chat-first view.
 - Select an adapter-provided reasoning effort when the chosen model advertises one.
 - Persist the selection in the existing `dsh.taskBoard.v1` localStorage ledger.
 - Load choices from the live `llm.models` catalog, so provider/model names and effort choices are not hard-coded.
@@ -19,6 +20,7 @@ Each task picks its executor:
 - **Codex** — runs the task as a managed **Codex App Server child** (`codex app-server --stdio`, JSON-RPC over stdio), implementing the "Richer DSH Codex Subagent" design:
   - **Live progress**: the detail view streams normalized activity — commands with output tails, file changes, MCP tool calls, warnings — plus the assistant's streaming answer, driven by App Server notifications (`item/started`, `item/completed`, `item/agentMessage/delta`, `turn/completed`).
   - **Multi-turn continuation**: every Codex execution persists a durable binding (`~/.dsh/task-board-model/bindings/<task>.json`, mode 0600 in a 0700 dir, atomic writes) mapping the task to its Codex thread. The detail view's **继续对话 / Continue thread** composer sends follow-ups on the SAME thread (`initialize → thread/resume → turn/start`), and the conversation survives both page reloads and dsh restarts. Resume is fail-closed: a missing binding, a different thread id, or a changed workspace fingerprint (sha256 of the cwd) refuses the continuation.
+  - **Chat-first results**: clicking a Codex sidebar row reads the complete stored thread with `thread/read` (`includeTurns: true`) and renders its user/assistant messages with DSH's Markdown component. Tool activity stays collapsible, live output streams into the current turn, and follow-ups remain on the same thread.
   - **Steer**: while a turn is active you can inject additional input (`turn/steer` with the expected turn id).
   - **Interrupt**: 停止 sends `turn/interrupt` first; only after a bounded grace does the process tree get terminated.
   - **Model/effort pins**: populated from the machine's own Codex catalog (`CODEX_HOME/models_cache.json` + `config.toml`), with a custom-slug option.
@@ -87,13 +89,14 @@ localStorage.removeItem('dsh.taskBoard.v1')
 - `src/host/appserver-client.ts` — typed JSON-RPC App Server client (framing, handshake, thread/turn ops, fail-closed server-request policy, bounded stderr).
 - `src/host/thread-bindings.ts` — durable task↔thread binding store (atomic writes, 0600/0700 modes, cwd fingerprints).
 - `src/host/codex-routes.ts` — host HTTP routes: run registry + event normalization, env catalog, git worktrees.
-- `src/client/board/NewTaskModal.tsx` and `TaskDetail.tsx` — executor/model/effort selectors, live activity, steer/follow-up composers, worktree manager.
+- `src/client/board/NewTaskModal.tsx`, `TaskDetail.tsx`, and `CodexConversation.tsx` — executor settings, task management, and the persisted Codex chat surface.
+- `src/client/running-jobs.ts` — synthetic live/result execution rows under workspace groups, with terminal results retained for inspection.
 - `src/client/index.ts` — DSH runtime/catalog adapters and host-route bridges.
 - `cordis.patch.yml` — profile-bundle replacement row.
 
 ## Verification performed
 
-- `pnpm test` — 33 regression tests pass: locale selection, ledger normalization, the Codex lifecycle against a **fake App Server executable** (handshake, thread/start vs validated resume, event normalization, fail-closed approvals, steer, interrupt; no network or credentials needed), binding-store validation/atomicity, real-git worktree integration, and the DSH-side codex execution paths.
+- `pnpm test` — regression tests cover locale selection, ledger normalization, the Codex lifecycle against a **fake App Server executable** (handshake, thread/start vs validated resume, `thread/read` history normalization, fail-closed approvals, steer, interrupt; no network or credentials needed), binding-store validation/atomicity, real-git worktree integration, the DSH-side codex execution paths, and the synthetic execution sidebar rows (creation, native-session handoff, terminal-result retention, click-through, archive/delete cleanup, and self-healing placement) under jsdom.
 - `pnpm run typecheck` — passes.
 - `pnpm run build` — host and lazy browser bundles pass.
 - The built browser bundle was evaluated through a fake `window.__ModuleLoader__.load` registration and exported `apply`/`inject` successfully.

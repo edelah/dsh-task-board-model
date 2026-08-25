@@ -7,6 +7,10 @@
 /** zh dictionary (key-set source of truth). */
 export declare const zh: {
     'entry.label': string;
+    'job.running': string;
+    'job.succeeded': string;
+    'job.failed': string;
+    'job.cancelled': string;
     'board.title': string;
     'board.close': string;
     'board.new': string;
@@ -16,6 +20,13 @@ export declare const zh: {
     'board.archive': string;
     'board.archiveView': string;
     'board.backToBoard': string;
+    'chat.taskSettings': string;
+    'chat.loading': string;
+    'chat.retry': string;
+    'chat.activity': string;
+    'chat.empty': string;
+    'chat.fallback': string;
+    'chat.running': string;
     'archive.empty': string;
     'board.status': string;
     'board.status.backlog': string;

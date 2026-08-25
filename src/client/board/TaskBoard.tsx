@@ -4,10 +4,11 @@
  * offers filter, new-task, and a back-to-chat escape.
  */
 import { memo, useCallback, useEffect, useState } from 'react'
-import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
+import { selectedCodexTaskOf, selectedTaskOf, type BoardController } from '../../core/controller.ts'
 import { COLUMNS, type TaskRecord, type TaskStatus } from '../../core/tasks.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import css from '../board.module.css'
+import { CodexConversation } from './CodexConversation.tsx'
 import { NewTaskModal } from './NewTaskModal.tsx'
 import { STATUS_KEY } from './status-key.ts'
 import { TaskCard } from './TaskCard.tsx'
@@ -41,6 +42,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const [filter, setFilter] = useState('')
   const [showNew, setShowNew] = useState(false)
   const selected = selectedTaskOf(snapshot)
+  const codexTask = selectedCodexTaskOf(snapshot)
   const archiveView = snapshot.archiveView
   // Archived tasks leave the columns; the archive view shows them instead.
   const visible = snapshot.tasks.filter(task =>
@@ -48,6 +50,8 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     && matchesFilter(task, filter),
   )
   const openTask = useCallback((id: string): void => { controller.openTask(id) }, [controller])
+
+  if (codexTask !== undefined) return <CodexConversation controller={controller} task={codexTask} />
 
   return (
     <div className={css.board} data-dsh-taskboard-board="">

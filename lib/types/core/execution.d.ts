@@ -91,6 +91,39 @@ export interface CodexRunSnapshot {
     activity?: readonly CodexActivityLine[];
     liveAnswer?: string;
 }
+/** One user/assistant message projected from a persisted Codex turn. */
+export interface CodexConversationMessage {
+    id: string;
+    role: 'user' | 'assistant';
+    text: string;
+    phase?: 'commentary' | 'final_answer';
+}
+/** One safe activity summary projected from a Codex tool item. */
+export interface CodexConversationActivity {
+    id: string;
+    kind: CodexActivityLine['kind'];
+    text: string;
+}
+/** One persisted Codex turn, suitable for the task-board chat surface. */
+export interface CodexConversationTurn {
+    id: string;
+    status: string;
+    messages: readonly CodexConversationMessage[];
+    activity: readonly CodexConversationActivity[];
+    error?: string;
+}
+/** Complete persisted Codex thread history. */
+export interface CodexConversation {
+    threadId: string;
+    turns: readonly CodexConversationTurn[];
+}
+export type CodexConversationResult = {
+    ok: true;
+    conversation: CodexConversation;
+} | {
+    ok: false;
+    error: string;
+};
 /** One status probe result for a hosted Codex run. */
 export type CodexStatusResult = {
     ok: true;
@@ -132,6 +165,8 @@ export interface CodexExecutionFace {
         error: unknown;
     }>;
     status(runId: string): Promise<CodexStatusResult>;
+    /** Read a task-owned persisted thread without resuming it. */
+    readConversation(taskId: string, threadId: string): Promise<CodexConversationResult>;
     /** Steer the active turn with additional user input. */
     steer(runId: string, content: string): Promise<{
         ok: boolean;
@@ -327,6 +362,8 @@ export declare class ExecutionService {
     runCodexFollowUp(task: TaskRecord, execution: ExecutionRecord, content: string, onEvent: (event: ExecutionEvent) => void): Promise<void>;
     /** Whether a follow-up can be sent: the latest Codex execution owns a thread. */
     canFollowUp(task: TaskRecord): boolean;
+    /** Read the latest Codex thread for a task without changing its state. */
+    readCodexConversation(task: TaskRecord): Promise<CodexConversationResult>;
     /**
      * One live snapshot of the latest hosted run (activity + streaming answer)
      * for the detail view's progress display. Undefined when nothing is

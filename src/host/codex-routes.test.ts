@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   parseTopLevelStrings, readCodexEnv, resetRunsForTests, taskBoardRouteHandlers,
-  ROUTE_CODEX_CANCEL, ROUTE_CODEX_START, ROUTE_CODEX_STATUS, ROUTE_CODEX_STEER,
+  ROUTE_CODEX_CANCEL, ROUTE_CODEX_START, ROUTE_CODEX_STATUS, ROUTE_CODEX_STEER, ROUTE_CODEX_THREAD,
   sanitizeBranchName, WORKTREE_DIR_NAME,
   type SubprocessFace,
 } from './codex-routes.ts'
@@ -191,6 +191,9 @@ async function writeFakeCodex(dir: string, logPath: string): Promise<string> {
     '      }',
     '      break',
     '    }',
+    "    case 'thread/read':",
+    "      send({ jsonrpc: '2.0', id: msg.id, result: { thread: { id: msg.params.threadId, turns: [{ id: 'turn-stored-1', status: 'completed', items: [{ type: 'userMessage', id: 'user-1', content: [{ type: 'text', text: 'do the thing' }] }, { type: 'commandExecution', id: 'cmd-1', command: 'pnpm test' }, { type: 'reasoning', id: 'reasoning-1', content: ['secret'] }, { type: 'agentMessage', id: 'agent-1', phase: 'final_answer', text: 'All done.' }] }] } } })",
+    '      break',
     "    case 'turn/start': {",
     "      send({ jsonrpc: '2.0', id: msg.id, result: { turn: { id: 'turn-fake-1', status: 'inProgress' } } })",
     "      setTimeout(() => send({ jsonrpc: '2.0', method: 'item/started', params: { threadId: 'thread-fake-1', turnId: 'turn-fake-1', startedAtMs: 1, item: { type: 'commandExecution', command: 'echo hi', id: 'item-cmd' } } }), 10)",
@@ -286,6 +289,24 @@ describe('codex routes against the fake app-server', () => {
     const answer = readWireLog(logPath).reverse().find(entry =>
       entry.msg?.id === 'srv-1' && entry.msg?.result !== undefined)
     expect(answer?.msg?.result?.decision).toBe('decline')
+
+    const thread = await handlers.get(ROUTE_CODEX_THREAD)!({
+      taskId: 'task-a', threadId: 'thread-fake-1',
+    }) as Record<string, any>
+    expect(thread.ok).toBe(true)
+    expect(thread.conversation.turns[0].messages).toEqual([
+      { id: 'user-1', role: 'user', text: 'do the thing' },
+      { id: 'agent-1', role: 'assistant', text: 'All done.', phase: 'final_answer' },
+    ])
+    expect(thread.conversation.turns[0].activity).toEqual([
+      { id: 'cmd-1', kind: 'command', text: '$ pnpm test' },
+    ])
+    expect(JSON.stringify(thread)).not.toContain('secret')
+    expect(readWireLog(logPath).some(entry =>
+      entry.msg?.method === 'thread/read' && entry.msg?.params?.includeTurns === true)).toBe(true)
+    expect(await handlers.get(ROUTE_CODEX_THREAD)!({
+      taskId: 'task-a', threadId: 'thread-other',
+    })).toMatchObject({ ok: false, error: 'thread binding mismatch' })
 
     // Steering a settled run fails cleanly.
     const lateSteer = await handlers.get(ROUTE_CODEX_STEER)!({ runId: started.runId, content: 'x' }) as { ok: boolean }

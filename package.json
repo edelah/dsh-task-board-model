@@ -38,6 +38,7 @@
     "react": "^18.2.0"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.0-rc.6",
     "schemastery": "^3.18.0"
   },
   "devDependencies": {

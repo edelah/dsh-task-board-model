@@ -184,6 +184,10 @@ function makeCodexFace(calls: string[], statuses: Array<CodexStatusResult | 'rej
       calls.push(`codex-status:${next.ok && next.state !== undefined ? next.state : 'error'}`)
       return next
     }),
+    readConversation: vi.fn(async (_taskId, threadId) => ({
+      ok: true as const,
+      conversation: { threadId, turns: [] },
+    })),
     cancel: vi.fn(async () => { calls.push('codex-cancel') }),
   }
 }
@@ -311,6 +315,9 @@ describe('codex execution', () => {
     wiring.env.codex = {
       start: vi.fn(),
       status: vi.fn(async () => state),
+      readConversation: vi.fn(async (_taskId, threadId) => ({
+        ok: true as const, conversation: { threadId, turns: [] },
+      })),
       steer: vi.fn(async () => ({ ok: true as const })),
       cancel: vi.fn(async () => {}),
     }

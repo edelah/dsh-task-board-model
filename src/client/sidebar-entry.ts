@@ -23,8 +23,12 @@ export const ENTRY_SELECTOR = '[data-dsh-taskboard-entry]'
 /** Inline icon (matches the shell's 16px nav-icon look). */
 const ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M6.5 6.5v7"/></svg>`
 
-/** Find the sidebar shell root element, or undefined while not yet mounted. */
-function sidebarRoot(): HTMLElement | undefined {
+/**
+ * Find the sidebar shell root element, or undefined while not yet mounted.
+ * Shared with running-jobs.ts, which injects its dynamic rows into the same
+ * root and must track the same element across shell rebuilds.
+ */
+export function sidebarRoot(): HTMLElement | undefined {
   const column = document.querySelector<HTMLElement>('[data-pane="sidebar"], [class*="sidebarCol"]')
   if (column === null) return undefined
   // Current shells wrap the sidebar UI: column > wrapper > root(logoRow owner).
@@ -35,7 +39,7 @@ function sidebarRoot(): HTMLElement | undefined {
 }
 
 /** The New Session button: nested in the logo row on current shells, a direct child on legacy shells. */
-function newSessionButton(root: HTMLElement): HTMLButtonElement | undefined {
+export function newSessionButton(root: HTMLElement): HTMLButtonElement | undefined {
   const nested = root.querySelector<HTMLButtonElement>('button[class*="newSession"]')
   if (nested !== null) return nested
   for (const child of root.children) {
