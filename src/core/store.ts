@@ -81,6 +81,7 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
     if (entry.error !== undefined && typeof entry.error !== 'string') return false
     if (entry.runner !== undefined && entry.runner !== 'dsh' && entry.runner !== 'codex') return false
     if (entry.runId !== undefined && typeof entry.runId !== 'string') return false
+    if (entry.cwd !== undefined && typeof entry.cwd !== 'string') return false
     if (entry.threadId !== undefined && typeof entry.threadId !== 'string') return false
     if (entry.outputTail !== undefined && typeof entry.outputTail !== 'string') return false
   }

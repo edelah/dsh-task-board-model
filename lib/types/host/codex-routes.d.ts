@@ -8,6 +8,32 @@ export interface WebServerFace {
         handler(req: IncomingMessage, res: ServerResponse): Promise<void> | void;
     }): unknown;
 }
+/** The small host-side slice needed to materialize a native DSH transcript. */
+export interface NativeSessionFace {
+    readonly id: string;
+    append(type: string, data: unknown, options?: {
+        surfaceOp?: 'append';
+        sourceEventSeqs?: readonly number[];
+    }): unknown;
+}
+export interface NativeSessionsFace {
+    create(id: string, options?: {
+        meta?: {
+            cwd?: string;
+        };
+    }): NativeSessionFace;
+    get(id: string): NativeSessionFace | undefined;
+    flush(session: NativeSessionFace): Promise<boolean>;
+}
+export interface NativeSessionPersistenceFace {
+    list(): Promise<readonly {
+        id: string;
+    }[]>;
+}
+export interface NativeSessionBridge {
+    sessions: NativeSessionsFace;
+    persistence?: NativeSessionPersistenceFace;
+}
 /** Collected-output reader slice of the subprocess seam. */
 export interface SubprocessOutputReaderFace {
     readFrom(fromByte: number): {
@@ -166,6 +192,7 @@ export declare const ROUTE_CODEX_STATUS = "/dsh-task-board/codex/status";
 export declare const ROUTE_CODEX_CANCEL = "/dsh-task-board/codex/cancel";
 export declare const ROUTE_CODEX_STEER = "/dsh-task-board/codex/steer";
 export declare const ROUTE_CODEX_THREAD = "/dsh-task-board/codex/thread";
+export declare const ROUTE_CODEX_IMPORT = "/dsh-task-board/codex/import";
 export declare const ROUTE_CODEX_ENV = "/dsh-task-board/codex/env";
 export declare const ROUTE_WORKTREE_CREATE = "/dsh-task-board/worktree/create";
 export declare const ROUTE_WORKTREE_REMOVE = "/dsh-task-board/worktree/remove";
@@ -175,13 +202,13 @@ export declare const ROUTE_WORKTREE_REMOVE = "/dsh-task-board/worktree/remove";
  * payload with an `ok` field). Exposed separately so tests can drive the
  * flows without faking http.ServerResponse.
  */
-export declare function taskBoardRouteHandlers(subprocess: SubprocessFace | undefined): Map<string, (args: Record<string, unknown>) => Promise<unknown>>;
+export declare function taskBoardRouteHandlers(subprocess: SubprocessFace | undefined, nativeBridge?: NativeSessionBridge): Map<string, (args: Record<string, unknown>) => Promise<unknown>>;
 /**
  * Register every task-board host route on the harness web server. Each
  * handler owns its full response. Returns the registration results (cordis
  * treats them as disposers when returned from ctx.effect).
  */
-export declare function registerTaskBoardRoutes(webServer: WebServerFace, subprocess: SubprocessFace | undefined): Array<unknown>;
+export declare function registerTaskBoardRoutes(webServer: WebServerFace, subprocess: SubprocessFace | undefined, nativeBridge?: NativeSessionBridge): Array<unknown>;
 /** Test-only visibility into the run registry. */
 export declare function peekRunForTests(runId: string): CodexRun | undefined;
 /** Test hook: clear all runs between tests. */

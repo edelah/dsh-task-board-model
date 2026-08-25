@@ -308,16 +308,41 @@ export class BoardController {
     }
   }
 
-  /** Open a Codex task's persisted thread in the board-owned chat surface. */
-  openCodexConversation(id: string): void {
+  /**
+   * Open a Codex task as a native DSH conversation when the host can import
+   * it. The board-owned Codex surface remains visible while an import is in
+   * flight and is the fallback for hosts without the session bridge.
+   */
+  async openCodexConversation(id: string): Promise<void> {
     const task = this.tasks.find(candidate => candidate.id === id)
     const latest = task?.executions[task.executions.length - 1]
-    if (latest?.runner !== 'codex' || latest.threadId === undefined) return
-    this.lastCurrent = currentOf(this.deps.sessions)
-    this.selectedTaskId = undefined
-    this.codexChatTaskId = id
-    this.boardOpen = true
-    this.notify()
+    if (task === undefined || latest?.runner !== 'codex' || latest.threadId === undefined) return
+    if (latest.sessionId !== undefined) {
+      this.closeBoard()
+      this.openSession(latest.sessionId)
+      return
+    }
+    const imported = await this.deps.exec.importCodexConversation(task)
+    if (!imported.ok) {
+      // The host may be an older deployment without session persistence. Only
+      // then fall back to the board-owned Codex transcript, so a successful
+      // import never flashes the custom view before native navigation.
+      this.lastCurrent = currentOf(this.deps.sessions)
+      this.selectedTaskId = undefined
+      this.codexChatTaskId = id
+      this.boardOpen = true
+      this.notify()
+      return
+    }
+    const fresh = this.tasks.find(candidate => candidate.id === id)
+    const execution = fresh?.executions[fresh.executions.length - 1]
+    if (fresh === undefined || execution === undefined || execution.runner !== 'codex') return
+    this.tasks = this.tasks.map(candidate => candidate.id === id
+      ? attachRunIdentity(candidate, execution.id, imported.sessionId, 'codex', undefined, undefined, execution.cwd, this.now())
+      : candidate)
+    this.persistAndNotify()
+    this.closeBoard()
+    this.openSession(imported.sessionId)
   }
 
   closeTask(): void {
@@ -491,6 +516,7 @@ export class BoardController {
             event.runner ?? 'dsh',
             event.runId,
             event.threadId,
+            event.cwd,
             this.now(),
           )
         : task)
@@ -739,6 +765,7 @@ function attachRunIdentity(
   runner: 'dsh' | 'codex',
   runId: string | undefined,
   threadId: string | undefined,
+  cwd: string | undefined,
   now: number,
 ): TaskRecord {
   return {
@@ -752,6 +779,7 @@ function attachRunIdentity(
             ...(sessionId === undefined ? {} : { sessionId }),
             ...(runId === undefined ? {} : { runId }),
             ...(threadId === undefined ? {} : { threadId }),
+            ...(cwd === undefined ? {} : { cwd }),
           }
         : execution),
   }

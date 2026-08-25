@@ -38,6 +38,8 @@ export interface ExecutionRecord {
    * this thread, so the conversation identity survives restarts.
    */
   threadId?: string
+  /** Absolute working directory used by a Codex execution. */
+  cwd?: string
   /** Short tail of the run output (Codex final answer / failure text) kept for display. */
   outputTail?: string
 }

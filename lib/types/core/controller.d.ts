@@ -171,8 +171,12 @@ export declare class BoardController {
      */
     toggleArchiveView(): void;
     openTask(id: string): void;
-    /** Open a Codex task's persisted thread in the board-owned chat surface. */
-    openCodexConversation(id: string): void;
+    /**
+     * Open a Codex task as a native DSH conversation when the host can import
+     * it. The board-owned Codex surface remains visible while an import is in
+     * flight and is the fallback for hosts without the session bridge.
+     */
+    openCodexConversation(id: string): Promise<void>;
     closeTask(): void;
     createTask(input: NewTaskInput): TaskRecord | undefined;
     updateTask(id: string, patch: TaskUpdatePatch): void;

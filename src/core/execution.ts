@@ -137,11 +137,15 @@ export type CodexStatusResult =
 /** The narrow host-route face that starts, tracks, steers, and cancels runs. */
 export interface CodexExecutionFace {
   start(request: CodexStartRequest): Promise<
-    { ok: true; runId: string; threadId?: string } | { ok: false; error: unknown }
+    { ok: true; runId: string; threadId?: string; cwd?: string } | { ok: false; error: unknown }
   >
   status(runId: string): Promise<CodexStatusResult>
   /** Read a task-owned persisted thread without resuming it. */
   readConversation(taskId: string, threadId: string): Promise<CodexConversationResult>
+  /** Materialize a task-owned Codex thread as a persisted native DSH session. */
+  importConversation?(taskId: string, threadId: string, cwd?: string): Promise<
+    { ok: true; sessionId: string } | { ok: false; error: unknown }
+  >
   /** Steer the active turn with additional user input. */
   steer(runId: string, content: string): Promise<{ ok: boolean; error?: string }>
   /** Best-effort interrupt of a running turn (grace before force-kill). */
@@ -245,6 +249,8 @@ export type ExecutionEvent =
     runId?: string
     /** Persistent Codex thread id (follow-ups resume it). */
     threadId?: string
+    /** Absolute working directory used by a Codex execution. */
+    cwd?: string
   }
   | {
     kind: 'worktree-ready'
@@ -457,6 +463,7 @@ export class ExecutionService {
       kind: 'started', taskId: task.id, executionId: execution.id,
       runner: 'codex', runId: started.runId,
       ...(started.threadId === undefined ? {} : { threadId: started.threadId }),
+      ...(started.cwd === undefined ? {} : { cwd: started.cwd }),
     })
     await this.pollCodexRun(codex, task.id, execution.id, started.runId, onEvent)
   }
@@ -607,6 +614,33 @@ export class ExecutionService {
     } catch (error) {
       return { ok: false, error: messageOf(error) }
     }
+  }
+
+  /** Import the latest Codex thread into a durable, native DSH session. */
+  async importCodexConversation(task: TaskRecord): Promise<
+    { ok: true; sessionId: string } | { ok: false; error: string }
+  > {
+    const threadId = latestCodexThreadId(task)
+    if (threadId === undefined) return { ok: false, error: 'this task has no persisted Codex thread' }
+    const codex = this.env.codex
+    if (codex === undefined) return { ok: false, error: 'codex executor unavailable' }
+    if (codex.importConversation === undefined) return { ok: false, error: 'native DSH session bridge unavailable' }
+    try {
+      const latest = task.executions[task.executions.length - 1]
+      const cwd = latest?.cwd ?? task.worktree?.path ?? this.workspacePath(task)
+      const result = await codex.importConversation(task.id, threadId, cwd)
+      return result.ok ? result : { ok: false, error: messageOf(result.error) }
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+  }
+
+  /** Best-effort workspace path for importing older Codex executions. */
+  private workspacePath(task: TaskRecord): string | undefined {
+    const items = this.env.workspaces.list.getSnapshot().items
+    const pathOf = (workspaceId: string | undefined): string | undefined =>
+      workspaceId === undefined ? undefined : items.find(item => item.workspaceId === workspaceId)?.path
+    return pathOf(task.workspaceId) ?? pathOf(this.env.workspaces.list.getSnapshot().recentWorkspaceId)
   }
 
   /**

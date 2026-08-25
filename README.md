@@ -5,7 +5,7 @@ A local fork of the DSH Web GUI task board with **per-task model and reasoning-e
 ## What changed
 
 - Select a provider/model for each task, or leave it at the runtime default.
-- An active execution without a native DSH session gets a synthetic sidebar item under its workspace (Codex runs, or the brief DSH session-creation window). Once DSH creates the real session row, the live synthetic item disappears to avoid duplicate live titles. After settlement, a result row remains under the workspace until the task is archived or deleted; DSH results open their native conversation and Codex results open the persisted Codex thread in a chat-first view.
+- An active execution without a native DSH session gets a synthetic sidebar item under its workspace (Codex runs, or the brief DSH session-creation window). Once DSH creates the real session row, the live synthetic item disappears to avoid duplicate live titles. After settlement, a result row remains under the workspace until the task is archived or deleted; DSH results open their native conversation, and Codex results are imported into a durable native DSH session on first click (the custom Codex view is only a fallback when the host has no session-persistence service).
 - Select an adapter-provided reasoning effort when the chosen model advertises one.
 - Persist the selection in the existing `dsh.taskBoard.v1` localStorage ledger.
 - Load choices from the live `llm.models` catalog, so provider/model names and effort choices are not hard-coded.
@@ -20,7 +20,8 @@ Each task picks its executor:
 - **Codex** — runs the task as a managed **Codex App Server child** (`codex app-server --stdio`, JSON-RPC over stdio), implementing the "Richer DSH Codex Subagent" design:
   - **Live progress**: the detail view streams normalized activity — commands with output tails, file changes, MCP tool calls, warnings — plus the assistant's streaming answer, driven by App Server notifications (`item/started`, `item/completed`, `item/agentMessage/delta`, `turn/completed`).
   - **Multi-turn continuation**: every Codex execution persists a durable binding (`~/.dsh/task-board-model/bindings/<task>.json`, mode 0600 in a 0700 dir, atomic writes) mapping the task to its Codex thread. The detail view's **继续对话 / Continue thread** composer sends follow-ups on the SAME thread (`initialize → thread/resume → turn/start`), and the conversation survives both page reloads and dsh restarts. Resume is fail-closed: a missing binding, a different thread id, or a changed workspace fingerprint (sha256 of the cwd) refuses the continuation.
-  - **Chat-first results**: clicking a Codex sidebar row reads the complete stored thread with `thread/read` (`includeTurns: true`) and renders its user/assistant messages with DSH's Markdown component. Tool activity stays collapsible, live output streams into the current turn, and follow-ups remain on the same thread.
+  - **Native chat results**: clicking a Codex sidebar row reads the complete stored thread with `thread/read` (`includeTurns: true`), translates its user/assistant turns into the ordinary DSH session event log, flushes that session through DSH persistence, and opens it through the normal session navigator. If the host does not expose session persistence, the board's custom Codex transcript remains available as a degraded fallback.
+  - The native session is a durable transcript copy. Codex-specific follow-ups still use the task detail's Continue thread control; a prompt typed into the imported DSH session is handled by DSH's normal agent.
   - **Steer**: while a turn is active you can inject additional input (`turn/steer` with the expected turn id).
   - **Interrupt**: 停止 sends `turn/interrupt` first; only after a bounded grace does the process tree get terminated.
   - **Model/effort pins**: populated from the machine's own Codex catalog (`CODEX_HOME/models_cache.json` + `config.toml`), with a custom-slug option.
@@ -37,7 +38,7 @@ Tasks can opt into running inside a dedicated git worktree:
 - Works for both executors: Codex executes in the worktree directory; DSH sessions open inside the worktree workspace.
 - The detail view can prepare the tree without running, open it as the current workspace, or remove it (`git worktree remove`; the branch and commits are never touched).
 
-Host routes added: `/dsh-task-board/codex/{env,start,status,steer,cancel}` and `/dsh-task-board/worktree/{create,remove}` (all JSON POSTs except env, following the dsh-open-terminal route pattern). They degrade gracefully when the web-server or subprocess service is absent.
+Host routes added: `/dsh-task-board/codex/{env,start,status,steer,cancel,thread,import}` and `/dsh-task-board/worktree/{create,remove}` (all JSON POSTs except env, following the dsh-open-terminal route pattern). They degrade gracefully when the web-server, subprocess, or session-persistence service is absent.
 
 ### Important DSH API caveat
 
@@ -88,7 +89,7 @@ localStorage.removeItem('dsh.taskBoard.v1')
 - `src/core/controller.ts` — live workspace, preset, model, and Codex option snapshots; worktree adoption; follow-ups.
 - `src/host/appserver-client.ts` — typed JSON-RPC App Server client (framing, handshake, thread/turn ops, fail-closed server-request policy, bounded stderr).
 - `src/host/thread-bindings.ts` — durable task↔thread binding store (atomic writes, 0600/0700 modes, cwd fingerprints).
-- `src/host/codex-routes.ts` — host HTTP routes: run registry + event normalization, env catalog, git worktrees.
+- `src/host/codex-routes.ts` — host HTTP routes: run registry + event normalization, native DSH transcript import, env catalog, git worktrees.
 - `src/client/board/NewTaskModal.tsx`, `TaskDetail.tsx`, and `CodexConversation.tsx` — executor settings, task management, and the persisted Codex chat surface.
 - `src/client/running-jobs.ts` — synthetic live/result execution rows under workspace groups, with terminal results retained for inspection.
 - `src/client/index.ts` — DSH runtime/catalog adapters and host-route bridges.

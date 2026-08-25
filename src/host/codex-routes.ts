@@ -19,6 +19,9 @@
  * - POST /dsh-task-board/codex/cancel  { runId }
  *     → turn/interrupt first; terminates the process tree after a grace
  *       period if the turn does not settle.
+ * - POST /dsh-task-board/codex/import { taskId, threadId, cwd? }
+ *     → translate the stored Codex transcript into a durable native DSH
+ *       session and return its sessionId (idempotent per task).
  * - GET  /dsh-task-board/codex/env
  *     → availability + the machine's Codex model catalog (models_cache.json)
  *       and config defaults, so the UI can offer real choices.
@@ -49,6 +52,30 @@ export interface WebServerFace {
     path: string
     handler(req: IncomingMessage, res: ServerResponse): Promise<void> | void
   }): unknown
+}
+
+/** The small host-side slice needed to materialize a native DSH transcript. */
+export interface NativeSessionFace {
+  readonly id: string
+  append(type: string, data: unknown, options?: {
+    surfaceOp?: 'append'
+    sourceEventSeqs?: readonly number[]
+  }): unknown
+}
+
+export interface NativeSessionsFace {
+  create(id: string, options?: { meta?: { cwd?: string } }): NativeSessionFace
+  get(id: string): NativeSessionFace | undefined
+  flush(session: NativeSessionFace): Promise<boolean>
+}
+
+export interface NativeSessionPersistenceFace {
+  list(): Promise<readonly { id: string }[]>
+}
+
+export interface NativeSessionBridge {
+  sessions: NativeSessionsFace
+  persistence?: NativeSessionPersistenceFace
 }
 
 /** Collected-output reader slice of the subprocess seam. */
@@ -409,6 +436,142 @@ async function readCodexConversation(
   }
 }
 
+/** Stable native-session identity for one task's imported Codex transcript. */
+function nativeSessionIdForTask(taskId: string): string {
+  return `task-board-codex-${taskId}`
+}
+
+/** Whether a native session already exists in memory or durable storage. */
+async function nativeSessionExists(bridge: NativeSessionBridge, sessionId: string): Promise<boolean> {
+  if (bridge.sessions.get(sessionId) !== undefined) return true
+  if (bridge.persistence === undefined) return false
+  try {
+    return (await bridge.persistence.list()).some(header => header.id === sessionId)
+  } catch {
+    return false
+  }
+}
+
+/** Turn one Codex message into the provider-neutral DSH message shape. */
+function nativeMessage(
+  message: Record<string, unknown>,
+  taskId: string,
+  turnId: string,
+  messageIndex: number,
+): Record<string, unknown> | undefined {
+  const text = typeof message.text === 'string' ? message.text.trim() : ''
+  const role = message.role
+  if (text === '' || (role !== 'user' && role !== 'assistant')) return undefined
+  const id = typeof message.id === 'string' && message.id !== ''
+    ? `codex-${taskId}-${turnId}-${message.id}`
+    : `codex-${taskId}-${turnId}-message-${messageIndex}`
+  if (role === 'user') {
+    return {
+      id,
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    }
+  }
+  return {
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    source: { kind: 'model', provider: 'codex', model: 'codex-app-server' },
+  }
+}
+
+/** Map a Codex turn status to the native DSH turn-end reason vocabulary. */
+function nativeTurnReason(turn: Record<string, unknown>): Record<string, unknown> {
+  const status = typeof turn.status === 'string' ? turn.status : ''
+  if (status === 'completed') return { kind: 'completed' }
+  if (status === 'interrupted' || status === 'aborted') {
+    return { kind: 'aborted', reason: { kind: 'user' } }
+  }
+  const error = typeof turn.error === 'object' && turn.error !== null
+    ? turn.error as Record<string, unknown>
+    : undefined
+  const errorText = typeof turn.error === 'string'
+    ? turn.error
+    : typeof error?.message === 'string' ? error.message : undefined
+  return {
+    kind: 'error',
+    error: {
+      message: errorText ?? `Codex turn ended with status ${status || 'unknown'}`,
+      code: 'CODEX_TURN_FAILED',
+    },
+  }
+}
+
+/** Append one normalized Codex turn using the ordinary DSH session log API. */
+function appendNativeTurn(
+  session: NativeSessionFace,
+  turn: Record<string, unknown>,
+  taskId: string,
+  turnIndex: number,
+): void {
+  const turnId = typeof turn.id === 'string' && turn.id !== '' ? turn.id : `turn-${turnIndex}`
+  const turnNumber = turnIndex + 1
+  session.append('turn/start', { turn: turnNumber })
+  session.append('step/start', { turn: turnNumber, step: 1 })
+  const messages = Array.isArray(turn.messages) ? turn.messages : []
+  for (const [messageIndex, value] of messages.entries()) {
+    if (typeof value !== 'object' || value === null) continue
+    const message = nativeMessage(value as Record<string, unknown>, taskId, turnId, messageIndex)
+    if (message === undefined) continue
+    if (message.role === 'user') {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    } else {
+      session.append('assistant/message', {
+        turn: turnNumber,
+        step: 1,
+        message,
+      }, { surfaceOp: 'append', sourceEventSeqs: [] })
+    }
+  }
+  session.append('step/end', { turn: turnNumber, step: 1 })
+  session.append('turn/end', { turn: turnNumber, reason: nativeTurnReason(turn) })
+}
+
+/** Import a validated Codex thread into one durable native DSH session. */
+async function importCodexConversation(
+  subprocess: SubprocessFace,
+  bridge: NativeSessionBridge | undefined,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (bridge === undefined) return { ok: false, error: 'native DSH session persistence is not mounted' }
+  const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : ''
+  const expectedThreadId = typeof args.threadId === 'string' ? args.threadId.trim() : ''
+  if (taskId === '' || expectedThreadId === '') return { ok: false, error: 'taskId and threadId are required' }
+  const sessionId = nativeSessionIdForTask(taskId)
+  if (await nativeSessionExists(bridge, sessionId)) return { ok: true, sessionId }
+
+  const conversationResult = await readCodexConversation(subprocess, args)
+  if (conversationResult.ok !== true) return conversationResult
+  const conversation = conversationResult.conversation as Record<string, unknown>
+  const turns = Array.isArray(conversation.turns) ? conversation.turns : []
+  if (turns.length === 0) return { ok: false, error: 'the Codex thread contains no importable turns' }
+
+  let cwd: string | undefined
+  if (typeof args.cwd === 'string' && args.cwd.trim() !== '') {
+    // The browser keeps the execution cwd in its task ledger for older jobs,
+    // but the host still re-validates it before copying it into DSH metadata.
+    try { cwd = resolveDirectory(args.cwd, 'cwd') } catch { /* stale worktree; keep metadata absent */ }
+  }
+  let session: NativeSessionFace
+  try {
+    session = bridge.sessions.create(sessionId, cwd === undefined ? undefined : { meta: { cwd } })
+    for (const [turnIndex, value] of turns.entries()) {
+      if (typeof value !== 'object' || value === null) continue
+      appendNativeTurn(session, value as Record<string, unknown>, taskId, turnIndex)
+    }
+    await bridge.sessions.flush(session)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+  return { ok: true, sessionId }
+}
+
 /** Attach notification + server-request handlers to a client for one run. */
 function attachRunHandlers(client: AppServerClient, run: CodexRun): void {
   // Server→client requests: fail closed (decline approvals, empty answers).
@@ -547,7 +710,7 @@ function settleRun(
 async function startCodexRun(
   subprocess: SubprocessFace,
   args: Record<string, unknown>,
-): Promise<{ ok: true; runId: string; threadId?: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; runId: string; threadId?: string; cwd?: string } | { ok: false; error: string }> {
   let cwd: string
   let prompt: string
   try {
@@ -712,7 +875,7 @@ async function startCodexRun(
     return { ok: false, error: `codex could not be started: ${message}` }
   }
 
-  return { ok: true, runId, ...(run.threadId === undefined ? {} : { threadId: run.threadId }) }
+  return { ok: true, runId, ...(run.threadId === undefined ? {} : { threadId: run.threadId }), cwd }
 }
 
 /** Project one run to its status payload (shared by status polling). */
@@ -1022,6 +1185,7 @@ export const ROUTE_CODEX_STATUS = '/dsh-task-board/codex/status'
 export const ROUTE_CODEX_CANCEL = '/dsh-task-board/codex/cancel'
 export const ROUTE_CODEX_STEER = '/dsh-task-board/codex/steer'
 export const ROUTE_CODEX_THREAD = '/dsh-task-board/codex/thread'
+export const ROUTE_CODEX_IMPORT = '/dsh-task-board/codex/import'
 export const ROUTE_CODEX_ENV = '/dsh-task-board/codex/env'
 export const ROUTE_WORKTREE_CREATE = '/dsh-task-board/worktree/create'
 export const ROUTE_WORKTREE_REMOVE = '/dsh-task-board/worktree/remove'
@@ -1034,6 +1198,7 @@ export const ROUTE_WORKTREE_REMOVE = '/dsh-task-board/worktree/remove'
  */
 export function taskBoardRouteHandlers(
   subprocess: SubprocessFace | undefined,
+  nativeBridge?: NativeSessionBridge,
 ): Map<string, (args: Record<string, unknown>) => Promise<unknown>> {
   type RouteHandler = (args: Record<string, unknown>) => Promise<unknown>
   const handlers = new Map<string, RouteHandler>([
@@ -1056,6 +1221,10 @@ export function taskBoardRouteHandlers(
       if (subprocess === undefined) return { ok: false, error: 'the subprocess service is not mounted' }
       return readCodexConversation(subprocess, args)
     }],
+    [ROUTE_CODEX_IMPORT, async args => {
+      if (subprocess === undefined) return { ok: false, error: 'the subprocess service is not mounted' }
+      return importCodexConversation(subprocess, nativeBridge, args)
+    }],
     [ROUTE_CODEX_CANCEL, async args => cancelCodexRun(args)],
     [ROUTE_WORKTREE_CREATE, async args => {
       if (subprocess === undefined) return { ok: false, error: 'the subprocess service is not mounted' }
@@ -1074,8 +1243,12 @@ export function taskBoardRouteHandlers(
  * handler owns its full response. Returns the registration results (cordis
  * treats them as disposers when returned from ctx.effect).
  */
-export function registerTaskBoardRoutes(webServer: WebServerFace, subprocess: SubprocessFace | undefined): Array<unknown> {
-  const handlers = taskBoardRouteHandlers(subprocess)
+export function registerTaskBoardRoutes(
+  webServer: WebServerFace,
+  subprocess: SubprocessFace | undefined,
+  nativeBridge?: NativeSessionBridge,
+): Array<unknown> {
+  const handlers = taskBoardRouteHandlers(subprocess, nativeBridge)
   return [...handlers.entries()].map(([path, handle]) =>
     webServer.register({
       kind: 'exact',

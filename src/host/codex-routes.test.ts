@@ -16,8 +16,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   parseTopLevelStrings, readCodexEnv, resetRunsForTests, taskBoardRouteHandlers,
-  ROUTE_CODEX_CANCEL, ROUTE_CODEX_START, ROUTE_CODEX_STATUS, ROUTE_CODEX_STEER, ROUTE_CODEX_THREAD,
+  ROUTE_CODEX_CANCEL, ROUTE_CODEX_IMPORT, ROUTE_CODEX_START, ROUTE_CODEX_STATUS, ROUTE_CODEX_STEER, ROUTE_CODEX_THREAD,
   sanitizeBranchName, WORKTREE_DIR_NAME,
+  type NativeSessionBridge, type NativeSessionFace, type NativeSessionPersistenceFace, type NativeSessionsFace,
   type SubprocessFace,
 } from './codex-routes.ts'
 import { bindingDirectory } from './thread-bindings.ts'
@@ -258,6 +259,33 @@ describe('codex routes against the fake app-server', () => {
     })
   }
 
+  function nativeBridge(): { bridge: NativeSessionBridge; events: Array<{ type: string; data: unknown }> } {
+    const records = new Map<string, NativeSessionFace>()
+    const durable = new Set<string>()
+    const events: Array<{ type: string; data: unknown }> = []
+    const sessions: NativeSessionsFace = {
+      create(id) {
+        const session: NativeSessionFace = {
+          id,
+          append(type, data) {
+            events.push({ type, data })
+          },
+        }
+        records.set(id, session)
+        return session
+      },
+      get(id) { return records.get(id) },
+      async flush(session) {
+        durable.add(session.id)
+        return true
+      },
+    }
+    const persistence: NativeSessionPersistenceFace = {
+      async list() { return [...durable].map(id => ({ id })) },
+    }
+    return { bridge: { sessions, persistence }, events }
+  }
+
   it('runs a full turn: events normalize, approvals decline fail-closed, answer lands', async () => {
     const handlers = localHandlers()
     const started = await handlers.get(ROUTE_CODEX_START)!({
@@ -311,6 +339,35 @@ describe('codex routes against the fake app-server', () => {
     // Steering a settled run fails cleanly.
     const lateSteer = await handlers.get(ROUTE_CODEX_STEER)!({ runId: started.runId, content: 'x' }) as { ok: boolean }
     expect(lateSteer.ok).toBe(false)
+  }, 30_000)
+
+  it('imports a Codex thread into the native DSH session event log', async () => {
+    const base = makeRealSubprocess()
+    const native = nativeBridge()
+    const handlers = taskBoardRouteHandlers({
+      resolveExecutable: async command => (command === 'codex' ? codexPath : command),
+      spawn: spec => base.spawn(spec),
+    }, native.bridge)
+    const started = await handlers.get(ROUTE_CODEX_START)!({
+      cwd: workDir, prompt: 'import me', taskId: 'task-native',
+    }) as { ok: boolean; runId?: string; threadId?: string; error?: string }
+    expect(started.ok, started.error).toBe(true)
+    await waitSettled(handlers, started.runId!)
+    const imported = await handlers.get(ROUTE_CODEX_IMPORT)!({
+      taskId: 'task-native', threadId: started.threadId, cwd: workDir,
+    }) as { ok: boolean; sessionId?: string; error?: string }
+    expect(imported.ok, imported.error).toBe(true)
+    expect(imported.sessionId).toBe('task-board-codex-task-native')
+    expect(native.events.map(event => event.type)).toEqual([
+      'turn/start', 'step/start', 'user/message', 'assistant/message', 'step/end', 'turn/end',
+    ])
+    expect(native.events.find(event => event.type === 'assistant/message')?.data).toMatchObject({
+      message: { role: 'assistant', source: { kind: 'model', provider: 'codex' } },
+    })
+    const repeated = await handlers.get(ROUTE_CODEX_IMPORT)!({
+      taskId: 'task-native', threadId: started.threadId,
+    }) as { ok: boolean; sessionId?: string }
+    expect(repeated).toEqual({ ok: true, sessionId: 'task-board-codex-task-native' })
   }, 30_000)
 
   it('resumes the persisted thread and rejects workspace mismatches', async () => {

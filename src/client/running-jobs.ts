@@ -59,9 +59,10 @@ function createJobRow(controller: BoardController, taskId: string): JobRow {
   const label = document.createElement('span')
   label.className = css.entryLabel
   el.append(icon, label)
-  // DSH executions open their native session. Codex executions own an App
-  // Server thread instead, so the board renders that thread in its chat-first
-  // surface. Only failures without either identity fall back to task detail.
+  // DSH executions open their native session. Codex executions are imported
+  // into a native DSH session on first click; the board-owned transcript is a
+  // fallback when that host bridge is unavailable. Only failures without
+  // either identity fall back to task detail.
   el.addEventListener('click', () => {
     const task = controller.getSnapshot().tasks.find(candidate => candidate.id === taskId)
     const sessionId = task?.executions[task.executions.length - 1]?.sessionId
@@ -70,7 +71,7 @@ function createJobRow(controller: BoardController, taskId: string): JobRow {
       controller.openSession(sessionId)
     } else if (task?.executions[task.executions.length - 1]?.runner === 'codex'
       && task.executions[task.executions.length - 1]?.threadId !== undefined) {
-      controller.openCodexConversation(taskId)
+      void controller.openCodexConversation(taskId)
     } else {
       controller.openBoard()
       controller.openTask(taskId)

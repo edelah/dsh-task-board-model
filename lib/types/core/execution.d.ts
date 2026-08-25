@@ -160,6 +160,7 @@ export interface CodexExecutionFace {
         ok: true;
         runId: string;
         threadId?: string;
+        cwd?: string;
     } | {
         ok: false;
         error: unknown;
@@ -167,6 +168,14 @@ export interface CodexExecutionFace {
     status(runId: string): Promise<CodexStatusResult>;
     /** Read a task-owned persisted thread without resuming it. */
     readConversation(taskId: string, threadId: string): Promise<CodexConversationResult>;
+    /** Materialize a task-owned Codex thread as a persisted native DSH session. */
+    importConversation?(taskId: string, threadId: string, cwd?: string): Promise<{
+        ok: true;
+        sessionId: string;
+    } | {
+        ok: false;
+        error: unknown;
+    }>;
     /** Steer the active turn with additional user input. */
     steer(runId: string, content: string): Promise<{
         ok: boolean;
@@ -292,6 +301,8 @@ export type ExecutionEvent = {
     runId?: string;
     /** Persistent Codex thread id (follow-ups resume it). */
     threadId?: string;
+    /** Absolute working directory used by a Codex execution. */
+    cwd?: string;
 } | {
     kind: 'worktree-ready';
     taskId: string;
@@ -364,6 +375,16 @@ export declare class ExecutionService {
     canFollowUp(task: TaskRecord): boolean;
     /** Read the latest Codex thread for a task without changing its state. */
     readCodexConversation(task: TaskRecord): Promise<CodexConversationResult>;
+    /** Import the latest Codex thread into a durable, native DSH session. */
+    importCodexConversation(task: TaskRecord): Promise<{
+        ok: true;
+        sessionId: string;
+    } | {
+        ok: false;
+        error: string;
+    }>;
+    /** Best-effort workspace path for importing older Codex executions. */
+    private workspacePath;
     /**
      * One live snapshot of the latest hosted run (activity + streaming answer)
      * for the detail view's progress display. Undefined when nothing is

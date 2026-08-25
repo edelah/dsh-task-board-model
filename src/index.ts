@@ -15,7 +15,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type { SubprocessFace, WebServerFace } from './host/codex-routes.ts'
+import type {
+  NativeSessionBridge, NativeSessionPersistenceFace, NativeSessionsFace,
+  SubprocessFace, WebServerFace,
+} from './host/codex-routes.ts'
 import { registerTaskBoardRoutes } from './host/codex-routes.ts'
 import { mountOnce } from './mount-once.ts'
 
@@ -81,8 +84,16 @@ function applyImpl(ctx: Context, config?: Config): void {
     const webServer = webCtx.get('webServer') as WebServerFace | undefined
     if (webServer === undefined) return
     const subprocess = webCtx.get('subprocess') as SubprocessFace | undefined
+    const nativeSessions = webCtx.get('sessions') as NativeSessionsFace | undefined
+    const nativePersistence = webCtx.get('sessionPersistence') as NativeSessionPersistenceFace | undefined
+    const nativeBridge: NativeSessionBridge | undefined = nativeSessions === undefined || nativePersistence === undefined
+      ? undefined
+      : {
+          sessions: nativeSessions,
+          persistence: nativePersistence,
+        }
     webCtx.effect(() => {
-      const registrations = registerTaskBoardRoutes(webServer, subprocess)
+      const registrations = registerTaskBoardRoutes(webServer, subprocess, nativeBridge)
       return () => {
         for (const registration of registrations) {
           if (typeof registration === 'function') (registration as () => void)()

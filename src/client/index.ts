@@ -42,6 +42,7 @@ const ROUTE_CODEX_STATUS = '/dsh-task-board/codex/status'
 const ROUTE_CODEX_CANCEL = '/dsh-task-board/codex/cancel'
 const ROUTE_CODEX_STEER = '/dsh-task-board/codex/steer'
 const ROUTE_CODEX_THREAD = '/dsh-task-board/codex/thread'
+const ROUTE_CODEX_IMPORT = '/dsh-task-board/codex/import'
 const ROUTE_WORKTREE_CREATE = '/dsh-task-board/worktree/create'
 const ROUTE_WORKTREE_REMOVE = '/dsh-task-board/worktree/remove'
 
@@ -159,6 +160,7 @@ export function apply(ctx: ClientContext): void {
             ok: true as const,
             runId: payload.runId,
             ...(typeof payload.threadId === 'string' ? { threadId: payload.threadId } : {}),
+            ...(typeof payload.cwd === 'string' ? { cwd: payload.cwd } : {}),
           }
         }
         return { ok: false as const, error: payload.error ?? 'codex start failed' }
@@ -215,6 +217,13 @@ export function apply(ctx: ClientContext): void {
           }
         }
         return { ok: false, error: String(payload.error ?? 'codex thread could not be read') }
+      },
+      importConversation: async (taskId, threadId, cwd) => {
+        const payload = await postHostRoute(ROUTE_CODEX_IMPORT, { taskId, threadId, ...(cwd === undefined ? {} : { cwd }) })
+        if (payload.ok === true && typeof payload.sessionId === 'string' && payload.sessionId !== '') {
+          return { ok: true as const, sessionId: payload.sessionId }
+        }
+        return { ok: false as const, error: payload.error ?? 'codex thread could not be imported as a DSH session' }
       },
       steer: async (runId, content) => {
         const payload = await postHostRoute(ROUTE_CODEX_STEER, { runId, content })
