@@ -1,17 +1,23 @@
 /**
  * Task detail: the full view of one task — content, prompt, execution
  * history — and the only place execution can be triggered. Also offers
- * delete (with confirmation), manual status moves, and a jump to the
- * execution's session transcript.
+ * delete (with confirmation), manual status moves, a jump to the
+ * execution's session transcript (DSH runs), and the git-worktree manager.
  */
 import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
+import type { CodexActivityLine } from '../../core/execution.ts'
 import { isValidCron } from '../../core/schedule.ts'
-import { MANUAL_STATUSES, TASK_PERMISSIONS, type ExecutionRecord, type TaskPermission, type TaskRecord, type TaskStatus } from '../../core/tasks.ts'
+import {
+  isTaskExecutor, MANUAL_STATUSES, TASK_PERMISSIONS,
+  type ExecutionRecord, type TaskExecutor, type TaskPermission, type TaskRecord, type TaskStatus,
+} from '../../core/tasks.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
 import css from '../board.module.css'
+import { CodexEffortField, CodexModelField } from './ExecutorFields.tsx'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
+import { WorktreeDetailSection } from './WorktreeSection.tsx'
 import { formatTime } from './TaskCard.tsx'
 import { STATUS_KEY } from './status-key.ts'
 
@@ -30,6 +36,13 @@ function ExecutionRow({ execution, onOpen }: { execution: ExecutionRecord; onOpe
       <span className={css.executionBadge} data-result={result}>
         {result === undefined ? t('detail.result.running') : t(RESULT_KEY[result])}
       </span>
+      <span
+        className={css.executorChip}
+        data-executor={execution.runner ?? 'dsh'}
+        title={(execution.runner ?? 'dsh') === 'codex' ? execution.runId : execution.sessionId}
+      >
+        {(execution.runner ?? 'dsh') === 'codex' ? t('detail.runner.codex') : t('detail.runner.dsh')}
+      </span>
       <span className={css.executionTimes}>
         {t('detail.executionStarted')} {formatTime(execution.startedAt)}
         {execution.endedAt !== undefined && ` · ${t('detail.executionEnded')} ${formatTime(execution.endedAt)}`}
@@ -46,6 +59,9 @@ function ExecutionRow({ execution, onOpen }: { execution: ExecutionRecord; onOpe
       )}
       {execution.error !== undefined && execution.error !== '' && (
         <span className={css.executionError}>{execution.error}</span>
+      )}
+      {execution.outputTail !== undefined && execution.outputTail !== '' && (
+        <pre className={css.outputBlock}>{execution.outputTail}</pre>
       )}
     </li>
   )
@@ -65,6 +81,8 @@ function ExecutionSettingsSection({ controller, task }: { controller: BoardContr
   const modelKey = modelSelection === undefined ? '' : `${modelSelection.provider}/${modelSelection.model}`
   const selectedModel = options.models.find(model => `${model.provider}/${model.model}` === modelKey)
   const selectedEffort = modelSelection?.reasoningEffort ?? ''
+  const executor: TaskExecutor = isTaskExecutor(task.executor) && task.executor === 'codex' ? 'codex' : 'dsh'
+  const codexSelected = executor === 'codex'
   // A pinned target may disappear from the runtime (workspace deleted,
   // preset removed); keep it selectable as a stale row instead of silently
   // dropping it, so the user sees exactly what the task will ask for.
@@ -75,7 +93,7 @@ function ExecutionSettingsSection({ controller, task }: { controller: BoardContr
   return (
     <section className={css.detailSection}>
       <h4>{t('detail.executionSettings')}</h4>
-      <p className={css.detailText}>{t('exec.hint')}</p>
+      <p className={css.detailText}>{codexSelected ? t('exec.hint.codex') : t('exec.hint')}</p>
       <label className={css.field}>
         <span className={css.fieldLabel}>{t('new.workspace')}</span>
         <select
@@ -91,21 +109,22 @@ function ExecutionSettingsSection({ controller, task }: { controller: BoardContr
         </select>
       </label>
       <label className={css.field}>
-        <span className={css.fieldLabel}>{t('new.mode')}</span>
+        <span className={css.fieldLabel}>{t('new.executor')}</span>
         <select
           className={css.select}
-          value={mode}
-          onChange={event => { controller.updateTask(task.id, { mode: event.target.value }) }}
+          value={executor}
+          onChange={event => {
+            const next = event.target.value
+            controller.updateTask(task.id, {
+              executor: isTaskExecutor(next) ? next as TaskExecutor : undefined,
+            })
+          }}
         >
-          <option value="">{t('exec.mode.default')}</option>
-          {!modeKnown && <option value={mode}>{mode}{t('exec.mode.removed')}</option>}
-          {options.presets.map(preset => (
-            <option key={preset.id} value={preset.id} disabled={preset.broken !== undefined}>
-              {preset.name ?? preset.id}
-              {preset.isDefault ? t('exec.mode.defaultSuffix') : ''}
-              {preset.broken !== undefined ? t('exec.mode.brokenSuffix') : ''}
-            </option>
-          ))}
+          <option value="dsh">{t('exec.executor.dsh')}</option>
+          <option value="codex">
+            {t('exec.executor.codex')}
+            {options.codex.available ? '' : t('exec.executor.codexUnavailable')}
+          </option>
         </select>
       </label>
       <label className={css.field}>
@@ -121,53 +140,90 @@ function ExecutionSettingsSection({ controller, task }: { controller: BoardContr
           ))}
         </select>
       </label>
-      <label className={css.field}>
-        <span className={css.fieldLabel}>{t('new.model')}</span>
-        <select
-          className={css.select}
-          value={modelKey}
-          onChange={event => {
-            const next = options.models.find(item => `${item.provider}/${item.model}` === event.target.value)
-            controller.updateTask(task.id, {
-              modelSelection: next === undefined ? undefined : { provider: next.provider, model: next.model },
-            })
-          }}
-        >
-          <option value="">{t('exec.model.default')}</option>
-          {!modelKnown && <option value={modelKey}>{modelKey}{t('exec.model.removedSuffix')}</option>}
-          {options.models.map(model => (
-            <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>
-              {model.providerName} / {model.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className={css.field}>
-        <span className={css.fieldLabel}>{t('new.reasoningEffort')}</span>
-        <select
-          className={css.select}
-          value={selectedEffort}
-          disabled={selectedModel === undefined || selectedModel.reasoning?.efforts.length === 0}
-          onChange={event => {
-            if (selectedModel === undefined) return
-            controller.updateTask(task.id, {
-              modelSelection: {
-                provider: selectedModel.provider,
-                model: selectedModel.model,
-                ...(event.target.value === '' ? {} : { reasoningEffort: event.target.value }),
-              },
-            })
-          }}
-        >
-          <option value="">{selectedModel?.reasoning?.defaultEffort !== undefined
-            ? t('exec.effort.defaultWithValue', { value: selectedModel.reasoning.defaultEffort })
-            : t('exec.effort.default')}</option>
-          {!effortKnown && <option value={selectedEffort}>{selectedEffort}{t('exec.effort.removedSuffix')}</option>}
-          {selectedModel?.reasoning?.efforts.map(effort => (
-            <option key={effort.id} value={effort.id}>{effort.name}</option>
-          ))}
-        </select>
-      </label>
+      {!codexSelected && (
+        <>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('new.mode')}</span>
+            <select
+              className={css.select}
+              value={mode}
+              onChange={event => { controller.updateTask(task.id, { mode: event.target.value }) }}
+            >
+              <option value="">{t('exec.mode.default')}</option>
+              {!modeKnown && <option value={mode}>{mode}{t('exec.mode.removed')}</option>}
+              {options.presets.map(preset => (
+                <option key={preset.id} value={preset.id} disabled={preset.broken !== undefined}>
+                  {preset.name ?? preset.id}
+                  {preset.isDefault ? t('exec.mode.defaultSuffix') : ''}
+                  {preset.broken !== undefined ? t('exec.mode.brokenSuffix') : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('new.model')}</span>
+            <select
+              className={css.select}
+              value={modelKey}
+              onChange={event => {
+                const next = options.models.find(item => `${item.provider}/${item.model}` === event.target.value)
+                controller.updateTask(task.id, {
+                  modelSelection: next === undefined ? undefined : { provider: next.provider, model: next.model },
+                })
+              }}
+            >
+              <option value="">{t('exec.model.default')}</option>
+              {!modelKnown && <option value={modelKey}>{modelKey}{t('exec.model.removedSuffix')}</option>}
+              {options.models.map(model => (
+                <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>
+                  {model.providerName} / {model.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('new.reasoningEffort')}</span>
+            <select
+              className={css.select}
+              value={selectedEffort}
+              disabled={selectedModel === undefined || selectedModel.reasoning?.efforts.length === 0}
+              onChange={event => {
+                if (selectedModel === undefined) return
+                controller.updateTask(task.id, {
+                  modelSelection: {
+                    provider: selectedModel.provider,
+                    model: selectedModel.model,
+                    ...(event.target.value === '' ? {} : { reasoningEffort: event.target.value }),
+                  },
+                })
+              }}
+            >
+              <option value="">{selectedModel?.reasoning?.defaultEffort !== undefined
+                ? t('exec.effort.defaultWithValue', { value: selectedModel.reasoning.defaultEffort })
+                : t('exec.effort.default')}</option>
+              {!effortKnown && <option value={selectedEffort}>{selectedEffort}{t('exec.effort.removedSuffix')}</option>}
+              {selectedModel?.reasoning?.efforts.map(effort => (
+                <option key={effort.id} value={effort.id}>{effort.name}</option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
+      {codexSelected && (
+        <>
+          <CodexModelField
+            options={options.codex}
+            value={task.codexModel}
+            onChange={slug => { controller.updateTask(task.id, { codexModel: slug }) }}
+          />
+          <CodexEffortField
+            options={options.codex}
+            modelSlug={task.codexModel ?? options.codex.defaultModel}
+            value={task.codexEffort}
+            onChange={effort => { controller.updateTask(task.id, { codexEffort: effort }) }}
+          />
+        </>
+      )}
     </section>
   )
 }
@@ -272,15 +328,160 @@ function ScheduleSection({ controller, task }: { controller: BoardController; ta
   )
 }
 
+/**
+ * Live view of a hosted Codex run: normalized activity (commands, file
+ * changes, MCP calls), the streaming answer while running, a steer input
+ * for the ACTIVE turn, and a follow-up composer that resumes the persisted
+ * thread after the run settled.
+ */
+function CodexLiveSection({ controller, task }: { controller: BoardController; task: TaskRecord }) {
+  const latest = task.executions[task.executions.length - 1]
+  const isCodex = task.executor === 'codex'
+  const running = task.status === 'running' && latest?.runner === 'codex' && latest?.endedAt === undefined
+  const canFollow = controller !== undefined && !running && isCodex && latest?.threadId !== undefined
+  const [snapshot, setSnapshot] = useState<{ activity?: readonly CodexActivityLine[]; liveAnswer?: string } | undefined>(undefined)
+  const [steerText, setSteerText] = useState('')
+  const [followUp, setFollowUp] = useState('')
+  const [sending, setSending] = useState(false)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
+
+  // Poll the host route directly while the run is active so commands and
+  // answer text stream in without touching the ledger.
+  useEffect(() => {
+    if (!running) {
+      setSnapshot(undefined)
+      return
+    }
+    let alive = true
+    const tick = (): void => {
+      void controller.codexRunSnapshot(task.id).then(view => {
+        if (alive) setSnapshot(view ?? { activity: [] })
+      })
+    }
+    tick()
+    const timer = setInterval(tick, 2000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [controller, task.id, running])
+
+  if (!isCodex) return null
+  const activity = snapshot?.activity ?? []
+  const liveAnswer = snapshot?.liveAnswer
+
+  const sendSteer = async (): Promise<void> => {
+    const content = steerText.trim()
+    if (content === '') return
+    setSending(true)
+    try {
+      const result = await controller.steerExecution(task.id, content)
+      if (!result.ok) setNotice(result.error)
+      else setNotice(undefined)
+      setSteerText('')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const sendFollowUp = async (): Promise<void> => {
+    const content = followUp.trim()
+    if (content === '' || sending) return
+    setSending(true)
+    setNotice(undefined)
+    try {
+      const launched = await controller.followUpTask(task.id, content)
+      if (launched) {
+        setFollowUp('')
+        // The board flips to running; the poll effect above takes over.
+      } else {
+        setNotice(t('detail.followUpUnavailable'))
+      }
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <section className={css.detailSection}>
+      <h4>{t('detail.activity')}</h4>
+      {activity.length > 0 && (
+        <ul className={css.activityList}>
+          {[...activity].slice(-12).map((entry, index) => (
+            <li key={`${entry.at}-${index}`}>
+              <span className={css.activityTime}>{formatTime(entry.at)}</span>
+              {entry.text}
+            </li>
+          ))}
+        </ul>
+      )}
+      {running && liveAnswer !== undefined && liveAnswer.trim() !== '' && (
+        <>
+          <p className={css.worktreeMeta}>{t('detail.liveAnswer')}</p>
+          <pre className={css.outputBlock}>{liveAnswer}</pre>
+        </>
+      )}
+      {running && (
+        <div className={css.followUpRow}>
+          <input
+            className={css.input}
+            value={steerText}
+            placeholder={t('detail.steerPlaceholder')}
+            onChange={event => { setSteerText(event.target.value) }}
+            onKeyDown={event => { if (event.key === 'Enter') void sendSteer() }}
+          />
+          <button
+            type="button"
+            className={css.ghostButton}
+            disabled={sending || steerText.trim() === ''}
+            onClick={() => { void sendSteer() }}
+          >
+            {t('detail.steer')}
+          </button>
+        </div>
+      )}
+      {!running && canFollow && (
+        <>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('detail.followUp')}</span>
+            <textarea
+              className={`${css.input} ${css.followUpInput}`}
+              rows={2}
+              value={followUp}
+              placeholder={t('detail.followUpPlaceholder')}
+              onChange={event => { setFollowUp(event.target.value); setNotice(undefined) }}
+            />
+          </label>
+          <div className={css.worktreeRow}>
+            <button
+              type="button"
+              className={css.primaryButton}
+              disabled={sending || followUp.trim() === ''}
+              onClick={() => { void sendFollowUp() }}
+            >
+              {sending ? t('detail.sending') : t('detail.send')}
+            </button>
+            <span className={css.worktreeMeta}>{t('detail.followUpHint')}</span>
+          </div>
+        </>
+      )}
+      {notice !== undefined && <p className={css.formError}>{notice}</p>}
+    </section>
+  )
+}
+
 /** Task detail overlay. */
 export function TaskDetail({ controller, task }: { controller: BoardController; task: TaskRecord }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const running = task.status === 'running'
+  // Only hosted Codex runs have a cancel verb today.
+  const latest = task.executions[task.executions.length - 1]
+  const canStop = running && latest?.runner === 'codex' && latest.endedAt === undefined
 
   // Keep the overlay in sync if the task record changes underneath.
-  const [latest, setLatest] = useState(task)
-  useEffect(() => { setLatest(task) }, [task])
-  const current = latest
+  const [latestTask, setLatestTask] = useState(task)
+  useEffect(() => { setLatestTask(task) }, [task])
+  const current = latestTask
 
   return (
     <div className={css.modalBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) controller.closeTask() }}>
@@ -311,7 +512,11 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
 
           <ExecutionSettingsSection controller={controller} task={current} />
 
+          <WorktreeDetailSection controller={controller} task={current} />
+
           <ScheduleSection controller={controller} task={current} />
+
+          <CodexLiveSection controller={controller} task={current} />
 
           <section className={css.detailSection}>
             <h4>{t('detail.execution')}</h4>
@@ -349,6 +554,15 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
         </div>
 
         <footer className={css.detailFooter}>
+          {canStop && (
+            <button
+              type="button"
+              className={css.dangerButton}
+              onClick={() => { void controller.cancelExecution(current.id) }}
+            >
+              {t('detail.stop')}
+            </button>
+          )}
           <button
             type="button"
             className={css.primaryButton}

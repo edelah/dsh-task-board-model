@@ -10,13 +10,13 @@ export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed'
 
 /**
  * One real execution attempt: the run's own id, the dsh session that ran it
- * (filled once the session is created), and the settled outcome once the
- * session's turn ended.
+ * (filled once the session is created; absent for Codex runs), and the
+ * settled outcome once the run ended.
  */
 export interface ExecutionRecord {
   /** Execution attempt id (uuid). */
   id: string
-  /** The dsh session that ran this attempt; absent until creation resolves. */
+  /** The dsh session that ran this attempt; absent until creation resolves (or for Codex runs). */
   sessionId: string | undefined
   /** When the run started (ms epoch). */
   startedAt: number
@@ -26,6 +26,20 @@ export interface ExecutionRecord {
   result: 'succeeded' | 'failed' | 'cancelled' | undefined
   /** Human failure text when the run failed (prompt rejection or agent error). */
   error: string | undefined
+  /**
+   * Which runner executed this attempt: the dsh session machinery (default)
+   * or a host-side OpenAI Codex App Server child.
+   */
+  runner?: 'dsh' | 'codex'
+  /** Host-side run id of a Codex execution (absent for dsh sessions). */
+  runId?: string
+  /**
+   * Persistent Codex thread id of a Codex execution. Follow-up turns resume
+   * this thread, so the conversation identity survives restarts.
+   */
+  threadId?: string
+  /** Short tail of the run output (Codex final answer / failure text) kept for display. */
+  outputTail?: string
 }
 
 /**
@@ -52,6 +66,22 @@ export interface TaskModelSelection {
   model: string
   /** Optional adapter-owned reasoning effort. */
   reasoningEffort?: string
+}
+
+/**
+ * The git worktree a task runs in. `branch` is requested up front; `path`
+ * and `workspaceId` are filled in once the worktree has been materialized
+ * on the host and registered as a DSH workspace (the sidebar entry).
+ */
+export interface TaskWorktreeSpec {
+  /** Git branch checked out in the worktree (created when missing). */
+  branch: string
+  /** Absolute worktree directory once created; absent until then. */
+  path?: string
+  /** DSH workspace id the worktree is registered as; absent until then. */
+  workspaceId?: string
+  /** When the worktree was materialized (ms epoch). */
+  createdAt?: number
 }
 
 /** One task on the board. */
@@ -91,9 +121,24 @@ export interface TaskRecord {
   permission?: TaskPermission
   /**
    * Provider/model/reasoning selection for the execution session; absent uses
-   * the session/DSH default.
+   * the session/DSH default. Only meaningful when executor is 'dsh'.
    */
   modelSelection?: TaskModelSelection
+  /**
+   * Which sub agent executes the task: the DSH session machinery (default,
+   * absent) or the host's OpenAI Codex CLI (`codex exec`).
+   */
+  executor?: TaskExecutor
+  /** Codex model slug pinned for a Codex execution; absent uses Codex's own default. */
+  codexModel?: string
+  /** Codex reasoning effort pinned for a Codex execution; absent uses Codex's own default. */
+  codexEffort?: string
+  /**
+   * Git worktree the task runs in (branch requested up front, materialized
+   * on first run or via the detail view). Absent means the task runs directly
+   * in its workspace.
+   */
+  worktree?: TaskWorktreeSpec
   /**
    * When the task was archived (ms epoch). Archived tasks keep their status
    * and execution history but leave the main board; absent means on-board.
@@ -116,6 +161,17 @@ export function isTaskPermission(value: unknown): value is TaskPermission {
   return typeof value === 'string' && (TASK_PERMISSIONS as readonly string[]).includes(value)
 }
 
+/** Sub agents a task may be executed by. */
+export const TASK_EXECUTORS = ['dsh', 'codex'] as const
+
+/** One executor id ('dsh' = the DSH session machinery; 'codex' = the Codex CLI). */
+export type TaskExecutor = typeof TASK_EXECUTORS[number]
+
+/** Whether an unknown value is a known executor id. */
+export function isTaskExecutor(value: unknown): value is TaskExecutor {
+  return typeof value === 'string' && (TASK_EXECUTORS as readonly string[]).includes(value)
+}
+
 /** Input for creating a task. */
 export interface NewTaskInput {
   title: string
@@ -129,6 +185,14 @@ export interface NewTaskInput {
   permission?: TaskPermission
   /** Provider/model/reasoning selection; absent = session/DSH default. */
   modelSelection?: TaskModelSelection
+  /** Sub agent that executes the task; absent = the DSH session machinery. */
+  executor?: TaskExecutor
+  /** Codex model slug; absent/blank = Codex's own default model. */
+  codexModel?: string
+  /** Codex reasoning effort; absent/blank = Codex's own default. */
+  codexEffort?: string
+  /** Git worktree to run in; `branch` is required when present. */
+  worktree?: { branch: string }
   /**
    * Optional scheduled-run rule requested at creation time (the new-task
    * dialog): an enable flag plus a 5-field cron expression. The create use
@@ -173,6 +237,36 @@ export function normalizeTargetId(value: string | undefined): string | undefined
   return trimmed === undefined || trimmed === '' ? undefined : trimmed
 }
 
+/**
+ * Turn a task title into a usable git branch slug: lowercase ASCII-ish word
+ * characters kept, everything else collapsed to `-`, trimmed of separators,
+ * with a compact timestamp suffix so two tasks with the same title never
+ * collide. Falls back to `task` when nothing survives the cleanup.
+ */
+export function slugifyBranch(title: string, now: number): string {
+  const base = title
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/g, '')
+  // Compact sortable suffix at minute precision.
+  const at = new Date(now)
+  const stamp = `${String(at.getMonth() + 1).padStart(2, '0')}${String(at.getDate()).padStart(2, '0')}`
+    + `${String(at.getHours()).padStart(2, '0')}${String(at.getMinutes()).padStart(2, '0')}`
+  return `${base === '' ? 'task' : base}-${stamp}`
+}
+
+/** Whether a proposed branch name satisfies git's check-ref-format basics. */
+export function isValidBranchName(branch: string): boolean {
+  if (!/^[^\s~^:?*[\\]+$/.test(branch)) return false
+  if (branch.startsWith('-') || branch.startsWith('/') || branch.endsWith('/')
+    || branch.endsWith('.') || branch.endsWith('.lock')) return false
+  if (branch.includes('..') || branch.includes('//')) return false
+  return true
+}
+
 /** Whether an unknown value is a structurally usable model selection. */
 export function isTaskModelSelection(value: unknown): value is TaskModelSelection {
   if (typeof value !== 'object' || value === null) return false
@@ -195,6 +289,31 @@ export function normalizeModelSelection(value: unknown): TaskModelSelection | un
   }
 }
 
+/**
+ * Normalize a worktree spec persisted or supplied by the UI: keep only a
+ * non-blank branch plus known string fields; a blank branch drops the whole
+ * spec (a worktree without a branch cannot be materialized).
+ */
+export function normalizeWorktree(value: unknown): TaskWorktreeSpec | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const spec = value as Record<string, unknown>
+  const branch = typeof spec.branch === 'string' ? spec.branch.trim() : ''
+  if (branch === '') return undefined
+  const path = typeof spec.path === 'string' && spec.path.trim() !== '' ? spec.path.trim() : undefined
+  const workspaceId = typeof spec.workspaceId === 'string' && spec.workspaceId.trim() !== ''
+    ? spec.workspaceId.trim()
+    : undefined
+  const createdAt = typeof spec.createdAt === 'number' && Number.isFinite(spec.createdAt)
+    ? spec.createdAt
+    : undefined
+  return {
+    branch,
+    ...(path === undefined ? {} : { path }),
+    ...(workspaceId === undefined ? {} : { workspaceId }),
+    ...(createdAt === undefined ? {} : { createdAt }),
+  }
+}
+
 /** Create a task from user input. */
 export function createTask(input: NewTaskInput, now: number, id: string): TaskRecord {
   return {
@@ -210,6 +329,10 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     mode: normalizeTargetId(input.mode),
     permission: isTaskPermission(input.permission) ? input.permission : undefined,
     modelSelection: normalizeModelSelection(input.modelSelection),
+    executor: isTaskExecutor(input.executor) && input.executor !== 'dsh' ? input.executor : undefined,
+    codexModel: normalizeTargetId(input.codexModel),
+    codexEffort: normalizeTargetId(input.codexEffort),
+    worktree: input.worktree === undefined ? undefined : normalizeWorktree({ branch: input.worktree.branch }),
   }
 }
 
@@ -277,12 +400,19 @@ export function settleExecution(
   outcome: 'succeeded' | 'failed' | 'cancelled',
   now: number,
   error: string | undefined,
+  outputTail?: string,
 ): TaskRecord {
   const index = task.executions.findIndex(execution => execution.id === executionId)
   if (index === -1) return task
   const execution = task.executions[index]
   if (execution.endedAt !== undefined) return task
-  const settled: ExecutionRecord = { ...execution, endedAt: now, result: outcome, error }
+  const settled: ExecutionRecord = {
+    ...execution,
+    endedAt: now,
+    result: outcome,
+    error,
+    outputTail,
+  }
   const executions = [...task.executions]
   executions[index] = settled
   const status: TaskStatus = outcome === 'succeeded' ? 'done'

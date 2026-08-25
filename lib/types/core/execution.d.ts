@@ -42,8 +42,7 @@ export interface SessionsExecutionFace {
     }): Promise<string>;
     /** Record a host-confirmed preset switch so the list label moves immediately. */
     noteAgentPreset?(sessionId: string, agentPreset: string): void;
-}
-/** The narrow agent-preset wire face the service needs (`agentPreset.select`). */
+} /** The narrow agent-preset wire face the service needs (`agentPreset.select`). */
 export interface PresetsExecutionFace {
     /** Recompose a blank session's agent from a preset. */
     select(sessionId: string, agentPreset: string): Promise<{
@@ -63,12 +62,121 @@ export interface ModelsExecutionFace {
         error: unknown;
     }>;
 }
+/** Request payload for starting one host-side Codex child turn. */
+export interface CodexStartRequest {
+    /** Absolute directory the run executes in. */
+    cwd: string;
+    /** The task prompt (delivered through the protocol, never argv). */
+    prompt: string;
+    /** Owning board task id (the thread binding key). */
+    taskId?: string;
+    /** Resume this persisted thread instead of starting a fresh one. */
+    resumeThreadId?: string;
+    /** Codex model slug; absent uses the machine's Codex default. */
+    model?: string;
+    /** Codex reasoning effort; absent uses the machine's Codex default. */
+    effort?: string;
+    /** Sandbox mode (the board's permission presets map 1:1). */
+    sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+}
+/** One normalized live-activity line of a hosted run. */
+export interface CodexActivityLine {
+    at: number;
+    kind: 'command' | 'fileChange' | 'mcpToolCall' | 'plan' | 'webSearch' | 'warning' | 'info';
+    text: string;
+}
+/** Live snapshot of one hosted Codex run for the detail view. */
+export interface CodexRunSnapshot {
+    running: boolean;
+    activity?: readonly CodexActivityLine[];
+    liveAnswer?: string;
+}
+/** One status probe result for a hosted Codex run. */
+export type CodexStatusResult = {
+    ok: true;
+    state: 'running';
+    threadId?: string;
+    activity?: readonly CodexActivityLine[];
+    liveAnswer?: string;
+} | {
+    ok: true;
+    state: 'succeeded';
+    threadId?: string;
+    lastMessage?: string;
+    outputTail?: string;
+    activity?: readonly CodexActivityLine[];
+    usage?: Record<string, unknown>;
+} | {
+    ok: true;
+    state: 'interrupted';
+    threadId?: string;
+    outputTail?: string;
+} | {
+    ok: true;
+    state: 'failed';
+    error?: string;
+    outputTail?: string;
+    activity?: readonly CodexActivityLine[];
+} | {
+    ok: false;
+    error: unknown;
+};
+/** The narrow host-route face that starts, tracks, steers, and cancels runs. */
+export interface CodexExecutionFace {
+    start(request: CodexStartRequest): Promise<{
+        ok: true;
+        runId: string;
+        threadId?: string;
+    } | {
+        ok: false;
+        error: unknown;
+    }>;
+    status(runId: string): Promise<CodexStatusResult>;
+    /** Steer the active turn with additional user input. */
+    steer(runId: string, content: string): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    /** Best-effort interrupt of a running turn (grace before force-kill). */
+    cancel(runId: string): Promise<void>;
+}
+/** Request payload for materializing (or reusing) one git worktree. */
+export interface WorktreeEnsureRequest {
+    /** Absolute directory inside the source repository. */
+    repoPath: string;
+    /** Branch to check out (created when missing). */
+    branch: string;
+    /** Human title used for auto-naming when branch is blank. */
+    title?: string;
+}
+/** The narrow host-route face that creates/removes git worktrees. */
+export interface WorktreeExecutionFace {
+    ensure(request: WorktreeEnsureRequest): Promise<{
+        ok: true;
+        path: string;
+        branch: string;
+        created: boolean;
+    } | {
+        ok: false;
+        error: unknown;
+    }>;
+    remove(request: {
+        path: string;
+        force?: boolean;
+    }): Promise<{
+        ok: true;
+    } | {
+        ok: false;
+        error: unknown;
+    }>;
+}
 /** The narrow workspaces face the service needs. */
 export interface WorkspacesExecutionFace {
     list: {
         getSnapshot(): {
             items: readonly {
                 workspaceId: string;
+                path?: string;
             }[];
             recentWorkspaceId: string | undefined;
         };
@@ -124,19 +232,46 @@ export interface ExecutionEnvironment {
     models?: ModelsExecutionFace;
     /** Raw-history reader for failure detection of never-opened sessions. */
     history?: HistoryExecutionFace;
+    /** Host-route face for Codex CLI executions; absent disables the codex executor. */
+    codex?: CodexExecutionFace;
+    /** Host-route face for git-worktree materialization; absent disables worktrees. */
+    worktrees?: WorktreeExecutionFace;
+    /**
+     * Register an absolute directory as a DSH workspace (sidebar entry); used
+     * to adopt materialized worktrees. Registration is idempotent per path.
+     */
+    registerWorkspace?: (path: string, title: string) => Promise<string | undefined>;
+    /** Poll interval (ms) for hosted-run status probes; defaults to 2000. */
+    pollIntervalMs?: number;
 }
 /** Outcome events the service emits to the controller. */
 export type ExecutionEvent = {
     kind: 'started';
     taskId: string;
     executionId: string;
-    sessionId: string;
+    /** The dsh session running this attempt (absent for Codex runs). */
+    sessionId?: string;
+    /** Which runner owns this attempt. */
+    runner?: 'dsh' | 'codex';
+    /** Host-side run id of a Codex execution. */
+    runId?: string;
+    /** Persistent Codex thread id (follow-ups resume it). */
+    threadId?: string;
+} | {
+    kind: 'worktree-ready';
+    taskId: string;
+    executionId: string;
+    path: string;
+    branch: string;
+    /** Workspace id the directory was registered as, when known. */
+    workspaceId?: string;
 } | {
     kind: 'settled';
     taskId: string;
     executionId: string;
     outcome: 'succeeded' | 'failed' | 'cancelled';
     error?: string;
+    outputTail?: string;
 };
 /**
  * Run one task to completion (or to a settled failure).
@@ -158,9 +293,80 @@ export declare class ExecutionService {
      * switch again.
      */
     private readonly presetSwitches;
+    /** Execution ids opened as Codex follow-ups (they resume the thread). */
+    private readonly followUpExecutions;
     /** @param env - the runtime faces (real or fake). */
     constructor(env: ExecutionEnvironment);
     run(task: TaskRecord, execution: ExecutionRecord, onEvent: (event: ExecutionEvent) => void): Promise<void>;
+    /**
+     * Execute one task through a host-side Codex App Server child: resolve the
+     * run directory (materializing the pinned git worktree first), start or
+     * RESUME the task's persistent thread, then poll its status until it
+     * settles. Never rejects.
+     */
+    private runViaCodex;
+    /**
+     * Resolve the place a task runs in. With a worktree spec the base
+     * workspace hosts `git worktree add` (idempotent per branch), the
+     * directory is registered as a workspace, and a worktree-ready event lets
+     * the controller persist the adopted spec.
+     */
+    private resolveRunTarget;
+    /**
+     * Poll one hosted Codex run until it settles, then emit the matching
+     * settled event. Transient status errors (a reconnect mid-run, say) are
+     * retried; an authoritative unknown-run answer settles as failed.
+     */
+    private pollCodexRun;
+    /**
+     * Send one follow-up prompt to a task's persisted Codex thread: opens a
+     * NEW execution record on the board while resuming the SAME conversation
+     * server-side (initialize → thread/resume → turn/start). The caller
+     * creates the execution record exactly like for run().
+     */
+    runCodexFollowUp(task: TaskRecord, execution: ExecutionRecord, content: string, onEvent: (event: ExecutionEvent) => void): Promise<void>;
+    /** Whether a follow-up can be sent: the latest Codex execution owns a thread. */
+    canFollowUp(task: TaskRecord): boolean;
+    /**
+     * One live snapshot of the latest hosted run (activity + streaming answer)
+     * for the detail view's progress display. Undefined when nothing is
+     * pollable; settled runs report their stored tail instead.
+     */
+    peekCodexRun(task: TaskRecord): Promise<CodexRunSnapshot | undefined>;
+    /** Steer the latest running hosted Codex execution with additional input. */
+    steerCodexRun(task: TaskRecord, content: string): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    /**
+     * Best-effort cancel of the latest hosted Codex execution of a task.
+     * @returns true when a cancellation request was delivered.
+     */
+    cancelCodexRun(task: TaskRecord): Promise<boolean>;
+    /**
+     * Materialize a task's git worktree without running the task (the detail
+     * view's prepare action). The callback lets the caller register + persist
+     * the resulting directory immediately.
+     */
+    prepareWorktree(task: TaskRecord, onReady: (event: {
+        path: string;
+        branch: string;
+        workspaceId?: string;
+    }) => void): Promise<{
+        ok: true;
+        path: string;
+        branch: string;
+    } | {
+        ok: false;
+        error: string;
+    }>;
+    /** Remove one git worktree directory (`git worktree remove`). */
+    removeWorktree(path: string, force?: boolean): Promise<{
+        ok: true;
+    } | {
+        ok: false;
+        error: string;
+    }>;
     /**
      * Recompose the execution session's agent from the task-pinned preset.
      * No-op when the task pins none or the session already runs it; fails the
@@ -204,6 +410,13 @@ export declare class ExecutionService {
      * @returns a settled event when the session state proves completion, else undefined.
      */
     reconcile(task: TaskRecord): Promise<ExecutionEvent | undefined>;
+    /**
+     * Settle a backgrounded Codex execution through one status probe. A
+     * transport failure stays silent (the next reconcile retries); an
+     * authoritative unknown-run answer settles as cancelled — the run's state
+     * died with the previous dsh process.
+     */
+    private reconcileCodex;
     /** Best-effort failure probe over the raw history tail (false when unavailable). */
     private historyShowsFailure;
     private connectSession;

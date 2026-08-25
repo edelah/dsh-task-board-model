@@ -13,7 +13,7 @@
  * owns only the orchestration seam (state, persistence, notify, execution,
  * navigation, reconciliation).
  */
-import { ExecutionService, type ExecutionEvent } from './execution.ts'
+import { ExecutionService, type CodexRunSnapshot, type ExecutionEvent } from './execution.ts'
 import type { TaskStore } from './store.ts'
 import {
   settleExecution, startExecution, withStatus,
@@ -40,6 +40,18 @@ export interface ControllerDeps {
   store: TaskStore
   exec: ExecutionService
   sessions: SessionsControllerFace
+  /**
+   * Register an absolute directory as a DSH workspace (the sidebar entry a
+   * materialized git worktree needs). Absent disables the registration step.
+   */
+  registerWorkspace?: (path: string, title: string) => Promise<string | undefined>
+  /** Delete a workspace registration (worktree removal cleanup). */
+  deleteWorkspace?: (workspaceId: string) => Promise<void>
+  /**
+   * Navigate the GUI to a workspace (connect its blank session and select it).
+   * Backs the detail view's "open workspace" affordance for worktrees.
+   */
+  openWorkspace?: (workspaceId: string) => void
   /** Clock; defaults to Date.now. */
   now?: () => number
   /** Id minting; defaults to a random-uuid. */
@@ -53,6 +65,8 @@ export interface ExecutionWorkspaceOption {
   workspaceId: string
   /** Display label (workspace title; the wiring falls back to the path). */
   title: string
+  /** Absolute directory of the workspace (worktree creation base). */
+  path?: string
 }
 
 /** One agent-preset option the execution-target pickers offer. */
@@ -85,11 +99,41 @@ export interface ExecutionModelOption {
   }
 }
 
+/** One Codex reasoning-effort choice advertised by a Codex model. */
+export interface CodexEffortChoice {
+  id: string
+  description?: string
+}
+
+/** One Codex model choice from the machine's catalog. */
+export interface CodexModelChoice {
+  slug: string
+  displayName: string
+  description?: string
+  efforts: readonly CodexEffortChoice[]
+  defaultEffort?: string
+}
+
+/** The host's Codex CLI facts the executor pickers offer. */
+export interface CodexOptionsSnapshot {
+  /** Whether the codex CLI / catalog could be found on the host. */
+  available: boolean
+  /** The config.toml default model, when readable. */
+  defaultModel?: string
+  /** The config.toml default reasoning effort, when readable. */
+  defaultEffort?: string
+  models: readonly CodexModelChoice[]
+}
+
+/** The empty Codex snapshot used until the first host read lands. */
+export const EMPTY_CODEX_OPTIONS: CodexOptionsSnapshot = { available: false, models: [] }
+
 /** The execution-target option sets the UI feeds into the controller. */
 export interface ExecutionOptionsSnapshot {
   workspaces: readonly ExecutionWorkspaceOption[]
   presets: readonly ExecutionPresetOption[]
   models: readonly ExecutionModelOption[]
+  codex: CodexOptionsSnapshot
 }
 
 /** Immutable controller snapshot for UI subscriptions. */
@@ -139,7 +183,7 @@ export class BoardController {
   private boardOpen = false
   private archiveView = false
   private selectedTaskId: string | undefined
-  private executionOptions: ExecutionOptionsSnapshot = { workspaces: [], presets: [], models: [] }
+  private executionOptions: ExecutionOptionsSnapshot = { workspaces: [], presets: [], models: [], codex: EMPTY_CODEX_OPTIONS }
   private listeners = new Set<() => void>()
   private disposers: Array<() => void> = []
   private readonly now: () => number
@@ -362,6 +406,17 @@ export class BoardController {
     this.deps.sessions.open(sessionId)
   }
 
+  /**
+   * Navigate the GUI to one of the task's workspaces (e.g. the materialized
+   * worktree): connect its blank session and select it, closing the board.
+   */
+  openTaskWorkspace(id: string): void {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    const workspaceId = task?.worktree?.workspaceId
+    if (workspaceId === undefined || this.deps.openWorkspace === undefined) return
+    this.deps.openWorkspace(workspaceId)
+  }
+
   // --- execution ---------------------------------------------------------------
 
   /**
@@ -398,16 +453,154 @@ export class BoardController {
   private handleExecutionEvent(event: ExecutionEvent): void {
     if (event.kind === 'started') {
       this.tasks = this.tasks.map(task => task.id === event.taskId
-        ? attachSessionId(task, event.executionId, event.sessionId, this.now())
+        ? attachRunIdentity(
+            task,
+            event.executionId,
+            event.sessionId,
+            event.runner ?? 'dsh',
+            event.runId,
+            event.threadId,
+            this.now(),
+          )
         : task)
       this.persistAndNotify()
       return
     }
+    if (event.kind === 'worktree-ready') {
+      void this.adoptWorktree(event.taskId, event.path, event.branch, event.workspaceId)
+      return
+    }
     this.activeExecutionIds.delete(event.executionId)
     this.tasks = this.tasks.map(task => task.id === event.taskId
-      ? settleExecution(task, event.executionId, event.outcome, this.now(), event.error)
+      ? settleExecution(task, event.executionId, event.outcome, this.now(), event.error, event.outputTail)
       : task)
     this.persistAndNotify()
+  }
+
+  /**
+   * Persist a materialized worktree onto its task and make sure the directory
+   * is registered as a DSH workspace so it appears in the sidebar's workspace
+   * list. Registration failures keep the worktree usable (the path is still
+   * recorded); only the sidebar entry is missing then.
+   */
+  private async adoptWorktree(
+    taskId: string,
+    path: string,
+    branch: string,
+    knownWorkspaceId?: string,
+  ): Promise<void> {
+    const task = this.tasks.find(candidate => candidate.id === taskId)
+    if (task === undefined) return
+    let workspaceId = knownWorkspaceId ?? task.worktree?.workspaceId
+    if (workspaceId === undefined && this.deps.registerWorkspace !== undefined) {
+      try {
+        const registered = await this.deps.registerWorkspace(path, task.title)
+        if (registered !== undefined) workspaceId = registered
+      } catch (error) {
+        console.error('[dsh-task-board] worktree workspace registration failed', error)
+      }
+    }
+    // Re-find after the awaited registration: a sibling tab may have rewritten
+    // the ledger meanwhile.
+    const fresh = this.tasks.find(candidate => candidate.id === taskId)
+    if (fresh === undefined) return
+    const spec = { ...(fresh.worktree ?? { branch }), branch, path, ...(workspaceId === undefined ? {} : { workspaceId }), createdAt: fresh.worktree?.createdAt ?? this.now() }
+    this.updateTask(taskId, { worktree: spec })
+  }
+
+  /**
+   * Materialize a task's git worktree without running the task (detail-view
+   * prepare action). The execution service creates/reuses it; adoption above
+   * registers + persists it.
+   */
+  async prepareWorktree(id: string): Promise<{ ok: boolean; error?: string; path?: string }> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined) return { ok: false, error: 'unknown task' }
+    const result = await this.deps.exec.prepareWorktree(task, ({ path, branch, workspaceId }) => {
+      void this.adoptWorktree(task.id, path, branch, workspaceId)
+    })
+    return result.ok
+      ? { ok: true, path: result.path }
+      : { ok: false, error: result.error }
+  }
+
+  /**
+   * Remove a task's git worktree directory (`git worktree remove`) and drop
+   * its workspace registration + record fields. The branch itself survives —
+   * deleting committed work is never implicit.
+   */
+  async removeWorktree(id: string, force = false): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    const path = task?.worktree?.path
+    if (task === undefined || path === undefined) return false
+    const removed = await this.deps.exec.removeWorktree(path, force)
+    if (!removed.ok) return false
+    const workspaceId = task.worktree?.workspaceId
+    if (workspaceId !== undefined && this.deps.deleteWorkspace !== undefined) {
+      try {
+        await this.deps.deleteWorkspace(workspaceId)
+      } catch (error) {
+        console.error('[dsh-task-board] worktree workspace deletion failed', error)
+      }
+    }
+    // Clear the materialized spec but keep nothing stale: the whole spec
+    // goes away (the branch itself survives in git).
+    this.updateTask(id, { worktree: undefined })
+    return true
+  }
+
+  /**
+   * Send one follow-up prompt to a settled Codex task's persisted thread.
+   * Opens a new execution record; the conversation continues server-side
+   * (initialize → thread/resume → turn/start).
+   * @returns true when the follow-up was launched.
+   */
+  async followUpTask(id: string, content: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || task.status === 'running') return false
+    if (content.trim() === '') return false
+    if (!this.deps.exec.canFollowUp(task)) return false
+    const { task: next, execution } = startExecution(task, this.now(), this.uuid())
+    this.tasks = this.tasks.map(candidate => candidate.id === id ? next : candidate)
+    this.persistAndNotify()
+    // This page owns the settlement of its own launch (see runTask).
+    this.activeExecutionIds.add(execution.id)
+    await this.deps.exec.runCodexFollowUp(
+      next,
+      execution,
+      content.trim(),
+      event => { this.handleExecutionEvent(event) },
+    )
+    return true
+  }
+
+  /**
+   * Steer the latest running Codex execution with additional input (the
+   * input is injected into the ACTIVE turn via turn/steer).
+   */
+  async steerExecution(id: string, content: string): Promise<{ ok: boolean; error?: string }> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || content.trim() === '') return { ok: false, error: 'nothing to send' }
+    return this.deps.exec.steerCodexRun(task, content.trim())
+  }
+
+  /** Live snapshot of the latest hosted Codex run (detail-view progress). */
+  async codexRunSnapshot(id: string): Promise<CodexRunSnapshot | undefined> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined) return undefined
+    return this.deps.exec.peekCodexRun(task)
+  }
+
+  /**
+   * Best-effort cancel of the latest running execution: hosted Codex turns
+   * are interrupted (turn/interrupt) with a bounded grace before the child
+   * process tree is terminated; DSH session runs have no cancel verb yet.
+   * @returns true when a cancellation request was delivered.
+   */
+  async cancelExecution(id: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined) return false
+    return this.deps.exec.cancelCodexRun(task)
   }
 
   // --- internals ---------------------------------------------------------------
@@ -496,18 +689,33 @@ export class BoardController {
   }
 }
 
-/** Record which session ran an execution (once the execution service reports it). */
-function attachSessionId(
+/**
+ * Record which runner took an execution over (once the execution service
+ * reports it): the dsh session id for session runs, or the host run id for a
+ * Codex CLI process.
+ */
+function attachRunIdentity(
   task: TaskRecord,
   executionId: string,
-  sessionId: string,
+  sessionId: string | undefined,
+  runner: 'dsh' | 'codex',
+  runId: string | undefined,
+  threadId: string | undefined,
   now: number,
 ): TaskRecord {
   return {
     ...task,
     updatedAt: now,
     executions: task.executions.map(execution =>
-      execution.id === executionId ? { ...execution, sessionId } : execution),
+      execution.id === executionId
+        ? {
+            ...execution,
+            runner,
+            ...(sessionId === undefined ? {} : { sessionId }),
+            ...(runId === undefined ? {} : { runId }),
+            ...(threadId === undefined ? {} : { threadId }),
+          }
+        : execution),
   }
 }
 

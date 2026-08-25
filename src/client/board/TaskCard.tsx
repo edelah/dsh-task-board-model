@@ -40,6 +40,14 @@ function TaskCardInner({ task, onClick }: { task: TaskRecord; onClick: () => voi
       {task.description !== '' && <span className={css.cardExcerpt}>{task.description}</span>}
       <span className={css.cardMeta}>
         <span className={css.cardTime}>{t('board.updated')} {formatTime(task.updatedAt)}</span>
+        {task.executor === 'codex' && (
+          <span className={css.executorChip} data-executor="codex">{t('card.codex')}</span>
+        )}
+        {task.worktree !== undefined && (
+          <span className={css.executorChip} title={task.worktree.path ?? task.worktree.branch}>
+            {t('card.worktree')}
+          </span>
+        )}
         {task.schedule?.enabled === true && (
           <span
             className={css.cardSchedule}

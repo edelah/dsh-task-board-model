@@ -8,13 +8,13 @@
 export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed';
 /**
  * One real execution attempt: the run's own id, the dsh session that ran it
- * (filled once the session is created), and the settled outcome once the
- * session's turn ended.
+ * (filled once the session is created; absent for Codex runs), and the
+ * settled outcome once the run ended.
  */
 export interface ExecutionRecord {
     /** Execution attempt id (uuid). */
     id: string;
-    /** The dsh session that ran this attempt; absent until creation resolves. */
+    /** The dsh session that ran this attempt; absent until creation resolves (or for Codex runs). */
     sessionId: string | undefined;
     /** When the run started (ms epoch). */
     startedAt: number;
@@ -24,6 +24,20 @@ export interface ExecutionRecord {
     result: 'succeeded' | 'failed' | 'cancelled' | undefined;
     /** Human failure text when the run failed (prompt rejection or agent error). */
     error: string | undefined;
+    /**
+     * Which runner executed this attempt: the dsh session machinery (default)
+     * or a host-side OpenAI Codex App Server child.
+     */
+    runner?: 'dsh' | 'codex';
+    /** Host-side run id of a Codex execution (absent for dsh sessions). */
+    runId?: string;
+    /**
+     * Persistent Codex thread id of a Codex execution. Follow-up turns resume
+     * this thread, so the conversation identity survives restarts.
+     */
+    threadId?: string;
+    /** Short tail of the run output (Codex final answer / failure text) kept for display. */
+    outputTail?: string;
 }
 /**
  * A scheduled-run rule attached to a task. The browser-side scheduler ticks
@@ -48,6 +62,21 @@ export interface TaskModelSelection {
     model: string;
     /** Optional adapter-owned reasoning effort. */
     reasoningEffort?: string;
+}
+/**
+ * The git worktree a task runs in. `branch` is requested up front; `path`
+ * and `workspaceId` are filled in once the worktree has been materialized
+ * on the host and registered as a DSH workspace (the sidebar entry).
+ */
+export interface TaskWorktreeSpec {
+    /** Git branch checked out in the worktree (created when missing). */
+    branch: string;
+    /** Absolute worktree directory once created; absent until then. */
+    path?: string;
+    /** DSH workspace id the worktree is registered as; absent until then. */
+    workspaceId?: string;
+    /** When the worktree was materialized (ms epoch). */
+    createdAt?: number;
 }
 /** One task on the board. */
 export interface TaskRecord {
@@ -86,9 +115,24 @@ export interface TaskRecord {
     permission?: TaskPermission;
     /**
      * Provider/model/reasoning selection for the execution session; absent uses
-     * the session/DSH default.
+     * the session/DSH default. Only meaningful when executor is 'dsh'.
      */
     modelSelection?: TaskModelSelection;
+    /**
+     * Which sub agent executes the task: the DSH session machinery (default,
+     * absent) or the host's OpenAI Codex CLI (`codex exec`).
+     */
+    executor?: TaskExecutor;
+    /** Codex model slug pinned for a Codex execution; absent uses Codex's own default. */
+    codexModel?: string;
+    /** Codex reasoning effort pinned for a Codex execution; absent uses Codex's own default. */
+    codexEffort?: string;
+    /**
+     * Git worktree the task runs in (branch requested up front, materialized
+     * on first run or via the detail view). Absent means the task runs directly
+     * in its workspace.
+     */
+    worktree?: TaskWorktreeSpec;
     /**
      * When the task was archived (ms epoch). Archived tasks keep their status
      * and execution history but leave the main board; absent means on-board.
@@ -103,6 +147,12 @@ export declare const TASK_PERMISSIONS: readonly ["read-only", "workspace-write",
 export type TaskPermission = typeof TASK_PERMISSIONS[number];
 /** Whether an unknown value is a known permission preset id. */
 export declare function isTaskPermission(value: unknown): value is TaskPermission;
+/** Sub agents a task may be executed by. */
+export declare const TASK_EXECUTORS: readonly ["dsh", "codex"];
+/** One executor id ('dsh' = the DSH session machinery; 'codex' = the Codex CLI). */
+export type TaskExecutor = typeof TASK_EXECUTORS[number];
+/** Whether an unknown value is a known executor id. */
+export declare function isTaskExecutor(value: unknown): value is TaskExecutor;
 /** Input for creating a task. */
 export interface NewTaskInput {
     title: string;
@@ -116,6 +166,16 @@ export interface NewTaskInput {
     permission?: TaskPermission;
     /** Provider/model/reasoning selection; absent = session/DSH default. */
     modelSelection?: TaskModelSelection;
+    /** Sub agent that executes the task; absent = the DSH session machinery. */
+    executor?: TaskExecutor;
+    /** Codex model slug; absent/blank = Codex's own default model. */
+    codexModel?: string;
+    /** Codex reasoning effort; absent/blank = Codex's own default. */
+    codexEffort?: string;
+    /** Git worktree to run in; `branch` is required when present. */
+    worktree?: {
+        branch: string;
+    };
     /**
      * Optional scheduled-run rule requested at creation time (the new-task
      * dialog): an enable flag plus a 5-field cron expression. The create use
@@ -143,10 +203,25 @@ export declare function isTaskStatus(value: unknown): value is TaskStatus;
 export declare function canMoveManually(_from: TaskStatus, to: TaskStatus): boolean;
 /** Normalize one optional execution-target string: trim; blank collapses to undefined. */
 export declare function normalizeTargetId(value: string | undefined): string | undefined;
+/**
+ * Turn a task title into a usable git branch slug: lowercase ASCII-ish word
+ * characters kept, everything else collapsed to `-`, trimmed of separators,
+ * with a compact timestamp suffix so two tasks with the same title never
+ * collide. Falls back to `task` when nothing survives the cleanup.
+ */
+export declare function slugifyBranch(title: string, now: number): string;
+/** Whether a proposed branch name satisfies git's check-ref-format basics. */
+export declare function isValidBranchName(branch: string): boolean;
 /** Whether an unknown value is a structurally usable model selection. */
 export declare function isTaskModelSelection(value: unknown): value is TaskModelSelection;
 /** Normalize a model selection persisted or supplied by the UI. */
 export declare function normalizeModelSelection(value: unknown): TaskModelSelection | undefined;
+/**
+ * Normalize a worktree spec persisted or supplied by the UI: keep only a
+ * non-blank branch plus known string fields; a blank branch drops the whole
+ * spec (a worktree without a branch cannot be materialized).
+ */
+export declare function normalizeWorktree(value: unknown): TaskWorktreeSpec | undefined;
 /** Create a task from user input. */
 export declare function createTask(input: NewTaskInput, now: number, id: string): TaskRecord;
 /** Clone a task with an updated status and a fresh updatedAt. */
@@ -171,7 +246,7 @@ export declare function startExecution(task: TaskRecord, now: number, executionI
  * matching column. No-op (returns the input task) when the execution is not
  * the task's latest or is already settled.
  */
-export declare function settleExecution(task: TaskRecord, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', now: number, error: string | undefined): TaskRecord;
+export declare function settleExecution(task: TaskRecord, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', now: number, error: string | undefined, outputTail?: string): TaskRecord;
 /** A settled-execution summary string for the detail view. */
 export declare function executionLabel(execution: ExecutionRecord): string;
 //# sourceMappingURL=tasks.d.ts.map

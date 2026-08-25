@@ -15,6 +15,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type { SubprocessFace, WebServerFace } from './host/codex-routes.ts'
+import { registerTaskBoardRoutes } from './host/codex-routes.ts'
 import { mountOnce } from './mount-once.ts'
 
 /** Order of the announcement section within the tool-guidance band. */
@@ -23,7 +25,7 @@ const SECTION_ORDER = 200
 export const inject = ['systemPrompt']
 
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
-export const TASK_BOARD_GUIDANCE = '本机已安装 dsh-task-board-model 插件（DSH Web GUI 的任务看板）：侧边栏「任务看板」入口。能力：多列看板管理任务；任务可真实执行（驱动 agent 会话）；任务可钉住执行目标——工作区 / 模式（agent 预设）/ 权限（read-only / workspace-write / danger-full-access）/ 模型 / 推理力度，缺省用运行时默认；任务支持 5 段 cron 定时执行（如 0 23 * * *）；数据存浏览器 localStorage（键 dsh.taskBoard.v1）。限制：定时调度在浏览器端，需 GUI 标签页打开，错过即跳过；模型选择通过当前 DSH API 应用，并可能更新部署默认模型；执行消耗 API 额度。用户提到「任务看板 / 看板 / 定时任务」时即指本插件，请据此协作。'
+export const TASK_BOARD_GUIDANCE = '本机已安装 dsh-task-board-model 插件（DSH Web GUI 的任务看板）：侧边栏「任务看板」入口。能力：多列看板管理任务；任务可真实执行；任务可钉住执行目标——工作区 / 模式（agent 预设）/ 权限（read-only / workspace-write / danger-full-access）/ 模型 / 推理力度，缺省用运行时默认；执行者可选 DSH 会话或 OpenAI Codex（经宿主机 codex app-server 运行：可选模型与推理力度、实时活动流、进行中可 steer 注入输入、结束后可在同一线程继续追问、重启后凭绑定恢复线程）；可为任务创建 git worktree 执行（自动注册为工作区，出现在侧边栏）；任务支持 5 段 cron 定时执行（如 0 23 * * *）；数据存浏览器 localStorage（键 dsh.taskBoard.v1）。限制：定时调度在浏览器端，需 GUI 标签页打开，错过即跳过；Codex 子代理审批请求一律拒绝（fail-closed），沙箱随权限预设固定；执行消耗 API 额度。用户提到「任务看板 / 看板 / 定时任务」时即指本插件，请据此协作。'
 
 /**
  * Settings namespace of the board's announcement capability — the section the
@@ -68,6 +70,26 @@ function applyImpl(ctx: Context, config?: Config): void {
   // (installSettingsSection swaps it when the namespace registers).
   let current: () => Config = () => config ?? {}
   let disposeSection: (() => void) | undefined
+
+  // Host routes for the Codex executor and git worktrees. The web server is
+  // optional to this plugin, so wait for it in a child injection instead of
+  // reading an undeclared property (Cordis rejects that access). The
+  // subprocess seam is optional and is therefore read through `get`; route
+  // handlers report its absence when a deployment does not mount it. The
+  // nested fiber and its effects disappear with the parent plugin.
+  ctx.inject(['webServer'], webCtx => {
+    const webServer = webCtx.get('webServer') as WebServerFace | undefined
+    if (webServer === undefined) return
+    const subprocess = webCtx.get('subprocess') as SubprocessFace | undefined
+    webCtx.effect(() => {
+      const registrations = registerTaskBoardRoutes(webServer, subprocess)
+      return () => {
+        for (const registration of registrations) {
+          if (typeof registration === 'function') (registration as () => void)()
+        }
+      }
+    }, 'task-board: host routes')
+  })
 
   // Register (or drop) the announcement to match the current source. The
   // section is kept under one disposer: re-registering first tears the old

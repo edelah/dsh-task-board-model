@@ -16,8 +16,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls the settings-surface Context merge (ctx.settingsScope).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { BoardController } from '../core/controller.ts'
-import { ExecutionService } from '../core/execution.ts'
+import { BoardController, EMPTY_CODEX_OPTIONS, type CodexModelChoice } from '../core/controller.ts'
+import { ExecutionService, type CodexExecutionFace, type WorktreeExecutionFace } from '../core/execution.ts'
 import { SchedulerService } from '../core/scheduler.ts'
 import { LocalStorageTaskStore } from '../core/store.ts'
 import { claimTaskboardApply, releaseTaskboardApply } from './apply-guard.ts'
@@ -31,6 +31,30 @@ const NS = 'task-board'
 
 /** Settings namespace the settings card edits (the Host plugin registers it). */
 const TASK_BOARD_NS = 'task-board'
+
+/** Host routes this package serves (see src/host/codex-routes.ts). */
+const ROUTE_CODEX_ENV = '/dsh-task-board/codex/env'
+const ROUTE_CODEX_START = '/dsh-task-board/codex/start'
+const ROUTE_CODEX_STATUS = '/dsh-task-board/codex/status'
+const ROUTE_CODEX_CANCEL = '/dsh-task-board/codex/cancel'
+const ROUTE_CODEX_STEER = '/dsh-task-board/codex/steer'
+const ROUTE_WORKTREE_CREATE = '/dsh-task-board/worktree/create'
+const ROUTE_WORKTREE_REMOVE = '/dsh-task-board/worktree/remove'
+
+/** POST one JSON body to a host route of this package (same-origin fetch). */
+async function postHostRoute(path: string, body: unknown): Promise<Record<string, unknown>> {
+  try {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    })
+    if (!response.ok) return { ok: false, error: `HTTP ${response.status} ${response.statusText}` }
+    return await response.json() as Record<string, unknown>
+  } catch (error) {
+    return { ok: false, error }
+  }
+}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -119,6 +143,104 @@ export function apply(ctx: ClientContext): void {
 
     // Core wiring: real runtime faces into the framework-free services.
     const store = new LocalStorageTaskStore()
+
+    // Codex executor + worktree faces over the host routes. The narrow
+    // result contracts mirror the host payloads; failures degrade to
+    // { ok: false } so the board keeps working without the features.
+    const codexFace: CodexExecutionFace = {
+      start: async request => {
+        const payload = await postHostRoute(ROUTE_CODEX_START, request)
+        if (payload.ok === true && typeof payload.runId === 'string') {
+          return {
+            ok: true as const,
+            runId: payload.runId,
+            ...(typeof payload.threadId === 'string' ? { threadId: payload.threadId } : {}),
+          }
+        }
+        return { ok: false as const, error: payload.error ?? 'codex start failed' }
+      },
+      status: async runId => {
+        const payload = await postHostRoute(ROUTE_CODEX_STATUS, { runId })
+        if (payload.ok !== true) {
+          return { ok: false as const, error: payload.error ?? 'codex status failed' }
+        }
+        // Normalized activity lines pass through untouched (bounded ring).
+        const activity = Array.isArray(payload.activity) ? payload.activity : undefined
+        const threadId = typeof payload.threadId === 'string' ? payload.threadId : undefined
+        if (payload.state === 'running') {
+          return {
+            ok: true as const, state: 'running' as const,
+            ...(threadId === undefined ? {} : { threadId }),
+            ...(activity === undefined ? {} : { activity }),
+            ...(typeof payload.lastMessage === 'string' ? { liveAnswer: payload.lastMessage } : {}),
+          }
+        }
+        if (payload.state === 'succeeded') {
+          return {
+            ok: true as const, state: 'succeeded' as const,
+            ...(threadId === undefined ? {} : { threadId }),
+            ...(typeof payload.lastMessage === 'string' ? { lastMessage: payload.lastMessage } : {}),
+            ...(typeof payload.outputTail === 'string' ? { outputTail: payload.outputTail } : {}),
+            ...(activity === undefined ? {} : { activity }),
+            ...(typeof payload.usage === 'object' && payload.usage !== null
+              ? { usage: payload.usage as Record<string, unknown> }
+              : {}),
+          }
+        }
+        if (payload.state === 'interrupted') {
+          return {
+            ok: true as const, state: 'interrupted' as const,
+            ...(threadId === undefined ? {} : { threadId }),
+            ...(typeof payload.outputTail === 'string' ? { outputTail: payload.outputTail } : {}),
+          }
+        }
+        return {
+          ok: true as const, state: 'failed' as const,
+          ...(payload.error === undefined ? {} : { error: String(payload.error) }),
+          ...(typeof payload.outputTail === 'string' ? { outputTail: payload.outputTail } : {}),
+          ...(activity === undefined ? {} : { activity }),
+        }
+      },
+      steer: async (runId, content) => {
+        const payload = await postHostRoute(ROUTE_CODEX_STEER, { runId, content })
+        if (payload.ok === true) return { ok: true }
+        return { ok: false, error: String(payload.error ?? 'steer rejected') }
+      },
+      cancel: async runId => {
+        await postHostRoute(ROUTE_CODEX_CANCEL, { runId })
+      },
+    }
+    const worktreeFace: WorktreeExecutionFace = {
+      ensure: async request => {
+        const payload = await postHostRoute(ROUTE_WORKTREE_CREATE, request)
+        if (payload.ok === true && typeof payload.path === 'string' && typeof payload.branch === 'string') {
+          return { ok: true as const, path: payload.path, branch: payload.branch, created: payload.created === true }
+        }
+        return { ok: false as const, error: payload.error ?? 'git worktree could not be created' }
+      },
+      remove: async request => {
+        const payload = await postHostRoute(ROUTE_WORKTREE_REMOVE, request)
+        return payload.ok === true ? { ok: true as const } : { ok: false as const, error: payload.error ?? 'git worktree removal failed' }
+      },
+    }
+
+    // Registering an existing path is idempotent per path on the host; the
+    // display title is then pointed at the task so the sidebar entry reads
+    // like the task it serves. Shared by the execution service (worktree
+    // adoption during runs) and the controller (prepare action).
+    const registerWorkspace = async (path: string, title: string): Promise<string | undefined> => {
+      const view = await workspaces.create({ path })
+      if (view.title !== title && title.trim() !== '') {
+        try {
+          const renamed = await workspaces.rename(view.workspaceId, title)
+          return renamed.workspaceId as string
+        } catch {
+          return view.workspaceId as string
+        }
+      }
+      return view.workspaceId as string
+    }
+
     const exec = new ExecutionService({
       sessions: {
         list: sessions.list,
@@ -187,6 +309,9 @@ export function apply(ctx: ClientContext): void {
             : undefined
         },
       },
+      codex: codexFace,
+      worktrees: worktreeFace,
+      registerWorkspace,
     })
     const controller = new BoardController({
       store,
@@ -194,6 +319,16 @@ export function apply(ctx: ClientContext): void {
       sessions: {
         list: sessions.list,
         open: id => sessions.open(id as SessionId),
+      },
+      registerWorkspace,
+      deleteWorkspace: async workspaceId => {
+        await workspaces.delete(workspaceId as WorkspaceId)
+      },
+      openWorkspace: workspaceId => {
+        void workspaces.connectWorkspace(workspaceId as WorkspaceId).then(
+          sessionId => { sessions.open(sessionId) },
+          error => { console.error('[dsh-task-board] open workspace failed', error) },
+        )
       },
     })
     controller.start()
@@ -237,11 +372,62 @@ export function apply(ctx: ClientContext): void {
         workspaces: snapshot.items.map(item => ({
           workspaceId: item.workspaceId,
           title: item.title !== '' ? item.title : item.path,
+          path: item.path,
         })),
       })
     }
     pushWorkspaceOptions()
     disposers.push(workspaces.list.subscribe(pushWorkspaceOptions))
+    // Codex executor facts (availability + the machine's model catalog) come
+    // from this package's host route; re-read after reconnects like the other
+    // runtime catalogs.
+    const pushCodexOptions = async (): Promise<void> => {
+      const payload = await postHostRoute(ROUTE_CODEX_ENV, {})
+      if (payload.ok !== true) {
+        controller.setExecutionOptions({ codex: EMPTY_CODEX_OPTIONS })
+        return
+      }
+      const models = Array.isArray(payload.models) ? payload.models : []
+      const choices: CodexModelChoice[] = []
+      for (const model of models) {
+        if (typeof model !== 'object' || model === null) continue
+        const record = model as Record<string, unknown>
+        if (typeof record.slug !== 'string' || record.slug === '') continue
+        const efforts = Array.isArray(record.efforts)
+          ? record.efforts.flatMap(effort => {
+              if (typeof effort !== 'object' || effort === null) return []
+              const effortRecord = effort as Record<string, unknown>
+              if (typeof effortRecord.id !== 'string' || effortRecord.id === '') return []
+              return [{
+                id: effortRecord.id,
+                ...(typeof effortRecord.description === 'string' ? { description: effortRecord.description } : {}),
+              }]
+            })
+          : []
+        choices.push({
+          slug: record.slug,
+          displayName: typeof record.displayName === 'string' && record.displayName !== ''
+            ? record.displayName
+            : record.slug,
+          ...(typeof record.description === 'string' ? { description: record.description } : {}),
+          efforts,
+          ...(typeof record.defaultEffort === 'string' ? { defaultEffort: record.defaultEffort } : {}),
+        })
+      }
+      controller.setExecutionOptions({
+        codex: {
+          available: payload.available === true,
+          models: choices,
+          ...(typeof payload.defaultModel === 'string' && payload.defaultModel !== ''
+            ? { defaultModel: payload.defaultModel }
+            : {}),
+          ...(typeof payload.defaultEffort === 'string' && payload.defaultEffort !== ''
+            ? { defaultEffort: payload.defaultEffort }
+            : {}),
+        },
+      })
+    }
+    void pushCodexOptions()
     const pushPresetOptions = async (): Promise<void> => {
       try {
         const response = await connection.api.agentPresets.list({})
@@ -295,6 +481,7 @@ export function apply(ctx: ClientContext): void {
     disposers.push(ctx.on('connection/reset', () => {
       void pushPresetOptions()
       void pushModelOptions()
+      void pushCodexOptions()
     }))
     try {
       disposers.push(mountSidebarEntry(controller))

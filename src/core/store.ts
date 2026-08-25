@@ -14,7 +14,10 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeModelSelection, normalizeTargetId, type ScheduleRule, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import {
+  isTaskExecutor, isTaskPermission, isTaskStatus, normalizeModelSelection, normalizeTargetId,
+  normalizeWorktree, type ScheduleRule, type TaskRecord, type TaskPermission, type TaskStatus,
+} from './tasks.ts'
 
 /** Persistence seam for the task ledger. */
 export interface TaskStore {
@@ -76,6 +79,10 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
     if (entry.endedAt !== undefined && typeof entry.endedAt !== 'number') return false
     if (entry.result !== undefined && entry.result !== 'succeeded' && entry.result !== 'failed' && entry.result !== 'cancelled') return false
     if (entry.error !== undefined && typeof entry.error !== 'string') return false
+    if (entry.runner !== undefined && entry.runner !== 'dsh' && entry.runner !== 'codex') return false
+    if (entry.runId !== undefined && typeof entry.runId !== 'string') return false
+    if (entry.threadId !== undefined && typeof entry.threadId !== 'string') return false
+    if (entry.outputTail !== undefined && typeof entry.outputTail !== 'string') return false
   }
   return true
 }
@@ -146,6 +153,12 @@ export function parseLedger(raw: string | null): TaskRecord[] {
     task.modelSelection = normalizeModelSelection(row.modelSelection)
     task.archivedAt = typeof row.archivedAt === 'number' && Number.isFinite(row.archivedAt) ? row.archivedAt : undefined
     task.permission = isTaskPermission(row.permission) ? row.permission as TaskPermission : undefined
+    // Executor pins: an unknown executor id falls back to the DSH runner;
+    // codex model/effort blanks collapse to undefined (Codex defaults).
+    task.executor = isTaskExecutor(row.executor) && row.executor !== 'dsh' ? row.executor : undefined
+    task.codexModel = normalizeTargetId(row.codexModel)
+    task.codexEffort = normalizeTargetId(row.codexEffort)
+    task.worktree = normalizeWorktree(row.worktree)
     tasks.push(task)
   }
   return tasks

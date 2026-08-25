@@ -1,14 +1,21 @@
 /**
  * New-task modal: title + description + the prompt that execution will send.
- * Creates through the controller (which persists immediately).
+ * Creates through the controller (which persists immediately). Execution
+ * targets include the executor (DSH session or Codex CLI) and an optional
+ * dedicated git worktree.
  */
 import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
-import { TASK_PERMISSIONS, type TaskPermission } from '../../core/tasks.ts'
+import {
+  isTaskExecutor, isValidBranchName, slugifyBranch,
+  TASK_PERMISSIONS, type TaskExecutor, type TaskPermission,
+} from '../../core/tasks.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
 import css from '../board.module.css'
+import { CodexEffortField, CodexModelField } from './ExecutorFields.tsx'
+import { WorktreeCreateFields } from './WorktreeSection.tsx'
 
 /** New-task form overlay. */
 export function NewTaskModal({ controller, onClose }: { controller: BoardController; onClose: () => void }) {
@@ -20,6 +27,11 @@ export function NewTaskModal({ controller, onClose }: { controller: BoardControl
   const [permission, setPermission] = useState('')
   const [modelKey, setModelKey] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState('')
+  const [executor, setExecutor] = useState<TaskExecutor>('dsh')
+  const [codexModel, setCodexModel] = useState<string | undefined>(undefined)
+  const [codexEffort, setCodexEffort] = useState<string | undefined>(undefined)
+  const [worktreeEnabled, setWorktreeEnabled] = useState(false)
+  const [worktreeBranch, setWorktreeBranch] = useState('')
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [scheduleCron, setScheduleCron] = useState('')
   const [scheduleError, setScheduleError] = useState<string | undefined>(undefined)
@@ -34,6 +46,9 @@ export function NewTaskModal({ controller, onClose }: { controller: BoardControl
   )
 
   const selectedModel = options.models.find(model => `${model.provider}/${model.model}` === modelKey)
+  const codex = options.codex
+  const branchInvalid = worktreeBranch.trim() !== '' && !isValidBranchName(worktreeBranch.trim())
+  const codexSelected = executor === 'codex'
 
   const submit = (): void => {
     if (scheduleEnabled) {
@@ -43,6 +58,7 @@ export function NewTaskModal({ controller, onClose }: { controller: BoardControl
         return
       }
     }
+    if (branchInvalid) return
     const task = controller.createTask({
       title,
       description,
@@ -50,11 +66,23 @@ export function NewTaskModal({ controller, onClose }: { controller: BoardControl
       workspaceId: workspaceId === '' ? undefined : workspaceId,
       mode: mode === '' ? undefined : mode,
       permission: permission === '' ? undefined : permission as TaskPermission,
-       modelSelection: selectedModel === undefined ? undefined : {
+       modelSelection: selectedModel === undefined || codexSelected ? undefined : {
          provider: selectedModel.provider,
          model: selectedModel.model,
          ...(reasoningEffort === '' ? {} : { reasoningEffort }),
        },
+      // A blank branch auto-naming here keeps one stable branch per task
+      // instead of re-deriving a new one on every run.
+      ...(worktreeEnabled ? {
+        worktree: {
+          branch: worktreeBranch.trim() !== ''
+            ? worktreeBranch.trim()
+            : slugifyBranch(title, Date.now()),
+        },
+      } : {}),
+      executor: codexSelected ? 'codex' : 'dsh',
+      ...(codexSelected && codexModel !== undefined ? { codexModel } : {}),
+      ...(codexSelected && codexEffort !== undefined ? { codexEffort } : {}),
       schedule: scheduleEnabled ? { enabled: true, cron: scheduleCron.trim() } : undefined,
     })
     if (task === undefined) {
@@ -127,20 +155,20 @@ export function NewTaskModal({ controller, onClose }: { controller: BoardControl
         </label>
 
         <label className={css.field}>
-          <span className={css.fieldLabel}>{t('new.mode')}</span>
+          <span className={css.fieldLabel}>{t('new.executor')}</span>
           <select
             className={css.select}
-            value={mode}
-            onChange={event => { setMode(event.target.value) }}
+            value={executor}
+            onChange={event => {
+              const next = event.target.value
+              setExecutor(isTaskExecutor(next) ? next : 'dsh')
+            }}
           >
-            <option value="">{t('exec.mode.default')}</option>
-            {options.presets.map(preset => (
-              <option key={preset.id} value={preset.id} disabled={preset.broken !== undefined}>
-                {preset.name ?? preset.id}
-                {preset.isDefault ? t('exec.mode.defaultSuffix') : ''}
-                {preset.broken !== undefined ? t('exec.mode.brokenSuffix') : ''}
-              </option>
-            ))}
+            <option value="dsh">{t('exec.executor.dsh')}</option>
+            <option value="codex">
+              {t('exec.executor.codex')}
+              {codex.available ? '' : t('exec.executor.codexUnavailable')}
+            </option>
           </select>
         </label>
 
@@ -158,42 +186,83 @@ export function NewTaskModal({ controller, onClose }: { controller: BoardControl
           </select>
         </label>
 
-        <label className={css.field}>
-          <span className={css.fieldLabel}>{t('new.model')}</span>
-          <select
-            className={css.select}
-            value={modelKey}
-            onChange={event => {
-              const nextKey = event.target.value
-              setModelKey(nextKey)
-              setReasoningEffort('')
-            }}
-          >
-            <option value="">{t('exec.model.default')}</option>
-            {options.models.map(model => (
-              <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>
-                {model.providerName} / {model.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        {!codexSelected && (
+          <>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.mode')}</span>
+              <select
+                className={css.select}
+                value={mode}
+                onChange={event => { setMode(event.target.value) }}
+              >
+                <option value="">{t('exec.mode.default')}</option>
+                {options.presets.map(preset => (
+                  <option key={preset.id} value={preset.id} disabled={preset.broken !== undefined}>
+                    {preset.name ?? preset.id}
+                    {preset.isDefault ? t('exec.mode.defaultSuffix') : ''}
+                    {preset.broken !== undefined ? t('exec.mode.brokenSuffix') : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-        <label className={css.field}>
-          <span className={css.fieldLabel}>{t('new.reasoningEffort')}</span>
-          <select
-            className={css.select}
-            value={reasoningEffort}
-            disabled={selectedModel === undefined || selectedModel.reasoning?.efforts.length === 0}
-            onChange={event => { setReasoningEffort(event.target.value) }}
-          >
-            <option value="">{selectedModel?.reasoning?.defaultEffort !== undefined
-              ? t('exec.effort.defaultWithValue', { value: selectedModel.reasoning.defaultEffort })
-              : t('exec.effort.default')}</option>
-            {selectedModel?.reasoning?.efforts.map(effort => (
-              <option key={effort.id} value={effort.id}>{effort.name}</option>
-            ))}
-          </select>
-        </label>
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.model')}</span>
+              <select
+                className={css.select}
+                value={modelKey}
+                onChange={event => {
+                  const nextKey = event.target.value
+                  setModelKey(nextKey)
+                  setReasoningEffort('')
+                }}
+              >
+                <option value="">{t('exec.model.default')}</option>
+                {options.models.map(model => (
+                  <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>
+                    {model.providerName} / {model.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className={css.field}>
+              <span className={css.fieldLabel}>{t('new.reasoningEffort')}</span>
+              <select
+                className={css.select}
+                value={reasoningEffort}
+                disabled={selectedModel === undefined || selectedModel.reasoning?.efforts.length === 0}
+                onChange={event => { setReasoningEffort(event.target.value) }}
+              >
+                <option value="">{selectedModel?.reasoning?.defaultEffort !== undefined
+                  ? t('exec.effort.defaultWithValue', { value: selectedModel.reasoning.defaultEffort })
+                  : t('exec.effort.default')}</option>
+                {selectedModel?.reasoning?.efforts.map(effort => (
+                  <option key={effort.id} value={effort.id}>{effort.name}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+
+        {codexSelected && (
+          <>
+            <CodexModelField options={codex} value={codexModel} onChange={setCodexModel} />
+            <CodexEffortField options={codex} modelSlug={codexModel ?? codex.defaultModel} value={codexEffort} onChange={setCodexEffort} />
+            <p className={css.worktreeMeta}>{t('exec.hint.codex')}</p>
+          </>
+        )}
+
+        <section className={css.detailSection}>
+          <h4>{t('new.worktree')}</h4>
+          <WorktreeCreateFields
+            enabled={worktreeEnabled}
+            branch={worktreeBranch}
+            invalid={branchInvalid}
+            onEnabledChange={setWorktreeEnabled}
+            onBranchChange={setWorktreeBranch}
+          />
+        </section>
 
         <section className={css.detailSection}>
           <h4>{t('detail.schedule')}</h4>

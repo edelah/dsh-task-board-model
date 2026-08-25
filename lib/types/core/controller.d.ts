@@ -13,7 +13,7 @@
  * owns only the orchestration seam (state, persistence, notify, execution,
  * navigation, reconciliation).
  */
-import { ExecutionService } from './execution.ts';
+import { ExecutionService, type CodexRunSnapshot } from './execution.ts';
 import type { TaskStore } from './store.ts';
 import { type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts';
 import { type TaskUpdatePatch } from './use-cases/task-update.ts';
@@ -33,6 +33,18 @@ export interface ControllerDeps {
     store: TaskStore;
     exec: ExecutionService;
     sessions: SessionsControllerFace;
+    /**
+     * Register an absolute directory as a DSH workspace (the sidebar entry a
+     * materialized git worktree needs). Absent disables the registration step.
+     */
+    registerWorkspace?: (path: string, title: string) => Promise<string | undefined>;
+    /** Delete a workspace registration (worktree removal cleanup). */
+    deleteWorkspace?: (workspaceId: string) => Promise<void>;
+    /**
+     * Navigate the GUI to a workspace (connect its blank session and select it).
+     * Backs the detail view's "open workspace" affordance for worktrees.
+     */
+    openWorkspace?: (workspaceId: string) => void;
     /** Clock; defaults to Date.now. */
     now?: () => number;
     /** Id minting; defaults to a random-uuid. */
@@ -45,6 +57,8 @@ export interface ExecutionWorkspaceOption {
     workspaceId: string;
     /** Display label (workspace title; the wiring falls back to the path). */
     title: string;
+    /** Absolute directory of the workspace (worktree creation base). */
+    path?: string;
 }
 /** One agent-preset option the execution-target pickers offer. */
 export interface ExecutionPresetOption {
@@ -73,11 +87,37 @@ export interface ExecutionModelOption {
         defaultEffort?: string;
     };
 }
+/** One Codex reasoning-effort choice advertised by a Codex model. */
+export interface CodexEffortChoice {
+    id: string;
+    description?: string;
+}
+/** One Codex model choice from the machine's catalog. */
+export interface CodexModelChoice {
+    slug: string;
+    displayName: string;
+    description?: string;
+    efforts: readonly CodexEffortChoice[];
+    defaultEffort?: string;
+}
+/** The host's Codex CLI facts the executor pickers offer. */
+export interface CodexOptionsSnapshot {
+    /** Whether the codex CLI / catalog could be found on the host. */
+    available: boolean;
+    /** The config.toml default model, when readable. */
+    defaultModel?: string;
+    /** The config.toml default reasoning effort, when readable. */
+    defaultEffort?: string;
+    models: readonly CodexModelChoice[];
+}
+/** The empty Codex snapshot used until the first host read lands. */
+export declare const EMPTY_CODEX_OPTIONS: CodexOptionsSnapshot;
 /** The execution-target option sets the UI feeds into the controller. */
 export interface ExecutionOptionsSnapshot {
     workspaces: readonly ExecutionWorkspaceOption[];
     presets: readonly ExecutionPresetOption[];
     models: readonly ExecutionModelOption[];
+    codex: CodexOptionsSnapshot;
 }
 /** Immutable controller snapshot for UI subscriptions. */
 export interface ControllerSnapshot {
@@ -180,6 +220,11 @@ export declare class BoardController {
      */
     openSession(sessionId: string): void;
     /**
+     * Navigate the GUI to one of the task's workspaces (e.g. the materialized
+     * worktree): connect its blank session and select it, closing the board.
+     */
+    openTaskWorkspace(id: string): void;
+    /**
      * Execute a task for real: move it to 'running', open an execution record,
      * and hand off to the ExecutionService. A second call while the task is
      * already running is ignored.
@@ -188,6 +233,53 @@ export declare class BoardController {
     /** Re-run a settled task: move it back to 'todo' first, then execute. */
     rerunTask(id: string): Promise<void>;
     private handleExecutionEvent;
+    /**
+     * Persist a materialized worktree onto its task and make sure the directory
+     * is registered as a DSH workspace so it appears in the sidebar's workspace
+     * list. Registration failures keep the worktree usable (the path is still
+     * recorded); only the sidebar entry is missing then.
+     */
+    private adoptWorktree;
+    /**
+     * Materialize a task's git worktree without running the task (detail-view
+     * prepare action). The execution service creates/reuses it; adoption above
+     * registers + persists it.
+     */
+    prepareWorktree(id: string): Promise<{
+        ok: boolean;
+        error?: string;
+        path?: string;
+    }>;
+    /**
+     * Remove a task's git worktree directory (`git worktree remove`) and drop
+     * its workspace registration + record fields. The branch itself survives —
+     * deleting committed work is never implicit.
+     */
+    removeWorktree(id: string, force?: boolean): Promise<boolean>;
+    /**
+     * Send one follow-up prompt to a settled Codex task's persisted thread.
+     * Opens a new execution record; the conversation continues server-side
+     * (initialize → thread/resume → turn/start).
+     * @returns true when the follow-up was launched.
+     */
+    followUpTask(id: string, content: string): Promise<boolean>;
+    /**
+     * Steer the latest running Codex execution with additional input (the
+     * input is injected into the ACTIVE turn via turn/steer).
+     */
+    steerExecution(id: string, content: string): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    /** Live snapshot of the latest hosted Codex run (detail-view progress). */
+    codexRunSnapshot(id: string): Promise<CodexRunSnapshot | undefined>;
+    /**
+     * Best-effort cancel of the latest running execution: hosted Codex turns
+     * are interrupted (turn/interrupt) with a bounded grace before the child
+     * process tree is terminated; DSH session runs have no cancel verb yet.
+     * @returns true when a cancellation request was delivered.
+     */
+    cancelExecution(id: string): Promise<boolean>;
     /** Reconcile running tasks and close the board when the user navigates. */
     private onSessionsChanged;
     private lastCurrent;
